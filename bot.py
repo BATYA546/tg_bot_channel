@@ -161,20 +161,12 @@ async def publish_scheduled_post(context: ContextTypes.DEFAULT_TYPE):
         post_data = job.data
         post_id = post_data['post_id']
 
-        if post_data.get('image_url') and post_data['image_url'] != 'None':
-            await context.bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=post_data['image_url'],
-                caption=post_data['message_text'],
-                parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=post_data['message_text'],
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True
-            )
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=post_data['message_text'],
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True
+        )
         
         # Отмечаем как опубликованный
         db.mark_as_published(post_id)
@@ -182,8 +174,6 @@ async def publish_scheduled_post(context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Ошибка при публикации поста: {e}")
-
-schedule_post
 
 async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Немедленная публикация поста."""
@@ -241,6 +231,86 @@ async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(error_msg)
         logger.error(f"Error in post_now: {e}")
 
+async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для планирования поста."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас нет прав для выполнения этой команды.")
+        return
+
+    full_text = update.message.text
+    logger.info(f"Received schedule command: {full_text}")
+
+    # Базовая проверка
+    if not full_text or len(full_text.strip()) <= len('/schedule'):
+        await update.message.reply_text(
+            "Использование: /schedule \"Текст поста\" ГГГГ-ММ-ДД ЧЧ:ММ\n\n"
+            "Пример:\n"
+            '/schedule "Запланированный пост" 2024-01-15 15:00'
+        )
+        return
+
+    # Парсим команду вручную
+    try:
+        # Убираем команду и разбиваем на части
+        parts = full_text[len('/schedule'):].strip().split('"')
+        
+        if len(parts) < 3:
+            await update.message.reply_text("❌ Неправильный формат. Используйте кавычки для текста.")
+            return
+
+        message_text = parts[1].strip()  # Текст между кавычками
+        rest = parts[2].strip()  # Остальная часть (дата и время)
+        
+        if not message_text:
+            await update.message.reply_text("❌ Текст поста не может быть пустым!")
+            return
+
+        # Парсим дату и время
+        datetime_parts = rest.split()
+        if len(datetime_parts) < 2:
+            await update.message.reply_text("❌ Укажите дату и время: ГГГГ-ММ-ДД ЧЧ:ММ")
+            return
+
+        date_str = datetime_parts[0]
+        time_str = datetime_parts[1]
+        
+        scheduled_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        now = datetime.now()
+
+        if scheduled_time <= now:
+            await update.message.reply_text("❌ Время публикации должно быть в будущем!")
+            return
+
+        # Сохраняем пост в БД (без картинки)
+        post_id = db.save_scheduled_post(message_text, None, scheduled_time)
+
+        # Создаем задачу
+        time_delta = scheduled_time - now
+        seconds_until_post = time_delta.total_seconds()
+
+        context.job_queue.run_once(
+            publish_scheduled_post,
+            seconds_until_post,
+            data={
+                'message_text': message_text, 
+                'image_url': None,
+                'post_id': post_id
+            },
+            name=str(post_id)
+        )
+
+        await update.message.reply_text(
+            f"✅ Пост запланирован на {scheduled_time.strftime('%d.%m.%Y в %H:%M')}\n"
+            f"📝 Текст: {message_text[:100]}..."
+        )
+        logger.info(f"Запланирован новый пост ID: {post_id}")
+
+    except ValueError as e:
+        await update.message.reply_text(f"❌ Ошибка в формате даты/времени. Используйте: ГГГГ-ММ-ДД ЧЧ:ММ\nОшибка: {e}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+        logger.error(f"Error in schedule_post: {e}")
+
 async def list_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает запланированные посты."""
     if update.effective_user.id != ADMIN_ID:
@@ -258,7 +328,6 @@ async def list_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"🆔 {post['id']}\n"
         message += f"📅 {post['scheduled_time'].strftime('%d.%m.%Y %H:%M')}\n"
         message += f"📝 {post['message_text'][:50]}...\n"
-        message += f"🖼️ {'Да' if post['image_url'] else 'Нет'}\n"
         message += "─" * 30 + "\n"
 
     await update.message.reply_text(message)
@@ -272,7 +341,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/post_now - опубликовать сейчас\n"
         "/list_posts - список запланированных постов\n\n"
         "Примеры:\n"
-        '/schedule "Привет мир" none 2024-01-15 14:30\n'
+        '/schedule "Привет мир" 2024-01-15 15:00\n'
         '/post_now "Срочная новость"'
     )
 
@@ -325,7 +394,7 @@ def main():
         # Загружаем запланированные посты при старте
         application.job_queue.run_once(
             lambda ctx: load_scheduled_posts(application), 
-            3
+            5
         )
 
         # Запускаем бота
