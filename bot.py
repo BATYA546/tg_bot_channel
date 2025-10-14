@@ -183,68 +183,7 @@ async def publish_scheduled_post(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при публикации поста: {e}")
 
-async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для планирования поста."""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ У вас нет прав для выполнения этой команды.")
-        return
-
-    if len(context.args) < 3:
-        await update.message.reply_text(
-            "Использование: /schedule \"Текст поста\" image_url 2024-01-15 14:30\n\n"
-            "Примеры:\n"
-            '/schedule "Текст без картинки" none 2024-01-15 14:30\n'
-            '/schedule "Текст с картинкой" https://example.com/image.jpg 2024-01-15 14:30'
-        )
-        return
-
-    message_text = context.args[0]
-    image_url = context.args[1].lower()  # Приводим к нижнему регистру
-    date_str = context.args[2]
-    time_str = context.args[3] if len(context.args) > 3 else "12:00"
-
-    # Обработка значения картинки
-    if image_url == 'none' or image_url == 'null' or image_url == 'нет':
-        image_url = None
-
-    try:
-        scheduled_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-        now = datetime.now()
-
-        if scheduled_time <= now:
-            await update.message.reply_text("❌ Время публикации должно быть в будущем!")
-            return
-
-        # Сохраняем пост в БД
-        post_id = db.save_scheduled_post(message_text, image_url, scheduled_time)
-
-        # Создаем задачу
-        time_delta = scheduled_time - now
-        seconds_until_post = time_delta.total_seconds()
-
-        context.job_queue.run_once(
-            publish_scheduled_post,
-            seconds_until_post,
-            data={
-                'message_text': message_text, 
-                'image_url': image_url,
-                'post_id': post_id
-            },
-            name=str(post_id)
-        )
-
-        await update.message.reply_text(
-            f"✅ Пост запланирован на {scheduled_time.strftime('%d.%m.%Y в %H:%M')}\n"
-            f"📝 Текст: {message_text[:50]}...\n"
-            f"🖼️ Картинка: {'Да' if image_url else 'Нет'}"
-        )
-        logger.info(f"Запланирован новый пост ID: {post_id}")
-
-    except ValueError as e:
-        await update.message.reply_text(f"❌ Ошибка в формате даты/времени. Используйте: ГГГГ-ММ-ДД ЧЧ:ММ")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-        logger.error(f"Error in schedule_post: {e}")
+schedule_post
 
 async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Немедленная публикация поста."""
@@ -252,42 +191,54 @@ async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ У вас нет прав для выполнения этой команды.")
         return
 
-    if not context.args:
+    # Получаем полный текст сообщения
+    full_text = update.message.text
+    logger.info(f"Received command: {full_text}")
+
+    # Проверяем есть ли аргументы после команды
+    if not full_text or len(full_text.strip()) <= len('/post_now'):
         await update.message.reply_text(
-            "Использование: /post_now \"Текст поста\" image_url\n\n"
-            "Примеры:\n"
-            '/post_now "Текст без картинки"\n'
-            '/post_now "Текст с картинкой" https://example.com/image.jpg'
+            "Использование: /post_now \"Текст поста\"\n\n"
+            "Пример:\n"
+            '/post_now "Привет, это тестовый пост!"'
         )
         return
 
-    message_text = context.args[0]
-    image_url = context.args[1].lower() if len(context.args) > 1 else None
+    # Извлекаем текст поста (все что после /post_now)
+    command_parts = full_text.split(' ', 1)
+    if len(command_parts) < 2:
+        await update.message.reply_text("❌ Не указан текст поста!")
+        return
 
-    # Обработка значения картинки
-    if image_url and (image_url == 'none' or image_url == 'null' or image_url == 'нет'):
-        image_url = None
+    message_text = command_parts[1].strip()
+    
+    # Убираем кавычки если они есть
+    if message_text.startswith('"') and message_text.endswith('"'):
+        message_text = message_text[1:-1]
+    elif message_text.startswith('"') and message_text.endswith('"'):
+        message_text = message_text[1:-1]
+
+    if not message_text:
+        await update.message.reply_text("❌ Текст поста не может быть пустым!")
+        return
+
+    logger.info(f"Publishing post: {message_text}")
 
     try:
-        if image_url:
-            await context.bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=image_url,
-                caption=message_text,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=message_text,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True
-            )
-        await update.message.reply_text("✅ Пост опубликован!")
-        logger.info("Немедленно опубликован пост")
+        # Публикуем простой текстовый пост
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=message_text,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True
+        )
+        
+        await update.message.reply_text("✅ Пост успешно опубликован в канал!")
+        logger.info(f"Пост опубликован: {message_text[:50]}...")
 
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при публикации: {e}")
+        error_msg = f"❌ Ошибка при публикации: {str(e)}"
+        await update.message.reply_text(error_msg)
         logger.error(f"Error in post_now: {e}")
 
 async def list_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -387,3 +338,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
