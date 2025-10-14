@@ -7,7 +7,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes, ChatMemberHa
 from telegram.constants import ParseMode
 from datetime import datetime
 from dotenv import load_dotenv
-import urllib.parse as urlparse
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -162,7 +161,7 @@ async def publish_scheduled_post(context: ContextTypes.DEFAULT_TYPE):
         post_data = job.data
         post_id = post_data['post_id']
 
-        if post_data.get('image_url'):
+        if post_data.get('image_url') and post_data['image_url'] != 'None':
             await context.bot.send_photo(
                 chat_id=CHANNEL_ID,
                 photo=post_data['image_url'],
@@ -192,16 +191,21 @@ async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if len(context.args) < 3:
         await update.message.reply_text(
-            "Использование: /schedule \"Текст поста\" image_url 2023-12-31 23:59\n"
-            "Пример: /schedule \"Привет мир!\" https://example.com/image.jpg 2023-12-31 23:59\n"
-            "Для поста без картинки: /schedule \"Текст\" None 2023-12-31 23:59"
+            "Использование: /schedule \"Текст поста\" image_url 2024-01-15 14:30\n\n"
+            "Примеры:\n"
+            '/schedule "Текст без картинки" none 2024-01-15 14:30\n'
+            '/schedule "Текст с картинкой" https://example.com/image.jpg 2024-01-15 14:30'
         )
         return
 
     message_text = context.args[0]
-    image_url = context.args[1] if context.args[1] != 'None' else None
+    image_url = context.args[1].lower()  # Приводим к нижнему регистру
     date_str = context.args[2]
     time_str = context.args[3] if len(context.args) > 3 else "12:00"
+
+    # Обработка значения картинки
+    if image_url == 'none' or image_url == 'null' or image_url == 'нет':
+        image_url = None
 
     try:
         scheduled_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
@@ -230,7 +234,9 @@ async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         await update.message.reply_text(
-            f"✅ Пост запланирован на {scheduled_time.strftime('%d.%m.%Y в %H:%M')}"
+            f"✅ Пост запланирован на {scheduled_time.strftime('%d.%m.%Y в %H:%M')}\n"
+            f"📝 Текст: {message_text[:50]}...\n"
+            f"🖼️ Картинка: {'Да' if image_url else 'Нет'}"
         )
         logger.info(f"Запланирован новый пост ID: {post_id}")
 
@@ -247,14 +253,23 @@ async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.message.reply_text('Использование: /post_now "Текст поста" image_url')
+        await update.message.reply_text(
+            "Использование: /post_now \"Текст поста\" image_url\n\n"
+            "Примеры:\n"
+            '/post_now "Текст без картинки"\n'
+            '/post_now "Текст с картинкой" https://example.com/image.jpg'
+        )
         return
 
     message_text = context.args[0]
-    image_url = context.args[1] if len(context.args) > 1 else None
+    image_url = context.args[1].lower() if len(context.args) > 1 else None
+
+    # Обработка значения картинки
+    if image_url and (image_url == 'none' or image_url == 'null' or image_url == 'нет'):
+        image_url = None
 
     try:
-        if image_url and image_url != 'None':
+        if image_url:
             await context.bot.send_photo(
                 chat_id=CHANNEL_ID,
                 photo=image_url,
@@ -292,7 +307,7 @@ async def list_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"🆔 {post['id']}\n"
         message += f"📅 {post['scheduled_time'].strftime('%d.%m.%Y %H:%M')}\n"
         message += f"📝 {post['message_text'][:50]}...\n"
-        message += f"🖼️ {'Есть' if post['image_url'] else 'Нет'}\n"
+        message += f"🖼️ {'Да' if post['image_url'] else 'Нет'}\n"
         message += "─" * 30 + "\n"
 
     await update.message.reply_text(message)
@@ -306,8 +321,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/post_now - опубликовать сейчас\n"
         "/list_posts - список запланированных постов\n\n"
         "Примеры:\n"
-        '/schedule "Привет мир" None 2023-12-31 23:59\n'
-        '/post_now "Срочная новость" None'
+        '/schedule "Привет мир" none 2024-01-15 14:30\n'
+        '/post_now "Срочная новость"'
     )
 
 async def load_scheduled_posts(application: Application):
