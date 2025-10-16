@@ -8,6 +8,7 @@ import telebot
 from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from content_finder import setup_content_finder
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -115,6 +116,86 @@ class DatabaseManager:
             conn.commit()
         except Exception as e:
             logger.error(f"❌ Error marking post: {e}")
+
+    def add_found_content(self, content_data):
+    """Сохраняет найденный контент в базу"""
+    try:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS found_content (
+                id SERIAL PRIMARY KEY,
+                title TEXT,
+                content TEXT,
+                category VARCHAR(50),
+                source VARCHAR(100),
+                url TEXT,
+                image_url TEXT,
+                is_approved BOOLEAN DEFAULT FALSE,
+                is_published BOOLEAN DEFAULT FALSE,
+                found_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute('''
+            INSERT INTO found_content (title, content, category, source, url)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        ''', (content_data['title'], content_data['summary'], 
+              content_data['category'], content_data['source'], 
+              content_data['url']))
+        
+        conn.commit()
+        return cursor.fetchone()[0]
+    except Exception as e:
+        self.logger.error(f"❌ Error saving found content: {e}")
+        raise
+
+# Добавляем команду для ручного поиска контента
+@bot.message_handler(commands=['find_content'])
+def find_content_command(message):
+    """Ручной поиск контента"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+
+    try:
+        bot.reply_to(message, "🔍 Начинаю поиск контента...")
+        
+        # Инициализируем поисковик
+        finder = setup_content_finder()
+        found_content = finder.search_content(max_posts=3)
+        
+        if found_content:
+            for content in found_content:
+                # Сохраняем в базу
+                content_id = db.add_found_content(content)
+                
+                # Отправляем превью админу
+                preview = finder.format_for_preview(content)
+                bot.send_message(
+                    ADMIN_ID, 
+                    preview, 
+                    parse_mode='Markdown',
+                    reply_markup=create_moderation_keyboard(content_id)
+                )
+            
+            bot.reply_to(message, f"✅ Найдено {len(found_content)} материалов. Проверьте предложения!")
+        else:
+            bot.reply_to(message, "❌ Не найдено подходящего контента.")
+            
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка поиска: {e}")
+
+def create_moderation_keyboard(content_id):
+    """Создает клавиатуру для модерации"""
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.row(
+        telebot.types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{content_id}"),
+        telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
+        telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
+    )
+    return markup
 
 # Инициализация БД
 db = DatabaseManager()
@@ -367,4 +448,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
