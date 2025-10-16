@@ -51,6 +51,89 @@ def convert_datetime(text):
 sqlite3.register_adapter(datetime, adapt_datetime)
 sqlite3.register_converter("DATETIME", convert_datetime)
 
+from telebot import types
+
+@bot.message_handler(content_types=['new_chat_members'])
+def welcome_new_member(message):
+    """Приветствует новых участников с интерактивной кнопкой"""
+    try:
+        for new_member in message.new_chat_members:
+            if new_member.id == bot.get_me().id:
+                continue
+                
+            if str(message.chat.id) == CHANNEL_ID:
+                # Создаем клавиатуру с кнопкой
+                markup = types.InlineKeyboardMarkup()
+                channel_btn = types.InlineKeyboardButton(
+                    "📱 Включить уведомления", 
+                    url="https://t.me/e_f_world"  # Замените на username вашего канала
+                )
+                markup.add(channel_btn)
+                
+                welcome_text = f"""
+🏆 *Добро пожаловать, {new_member.first_name}!*
+
+Вы присоединились к каналу о *Обо всём самом первом*:
+
+🚀 **Первые в мире** открытия
+⭐ **Мировые рекорды** и достижения  
+💡 **Революционные** технологии
+📌 **Уникальные** события
+
+*Чтобы не пропустить ничего важного:*
+                """
+                
+                bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=welcome_text,
+                    parse_mode='Markdown',
+                    reply_markup=markup
+                )
+                
+                logger.info(f"👋 Приветствовал: {new_member.first_name}")
+                
+    except Exception as e:
+        logger.error(f"❌ Ошибка при приветствии: {e}")
+
+@bot.message_handler(commands=['stats'])
+def stats_command(message):
+    """Показывает статистику канала (только для админа)"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+
+    try:
+        chat_info = bot.get_chat(CHANNEL_ID)
+        stats_text = f"""
+📊 *Статистика канала:*
+
+👥 Участников: `{chat_info.members_count}`
+🏷️ Название: `{chat_info.title}`
+📝 Описание: `{chat_info.description or 'Нет описания'}`
+        """
+        
+        bot.reply_to(message, stats_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка получения статистики: {e}")
+
+@bot.message_handler(commands=['rules'])
+def rules_command(message):
+    """Показывает правила канала"""
+    rules_text = """
+📋 *Правила нашего канала:*
+
+1. 🤝 Уважайте других участников
+2. 📢 Только релевантные обсуждения  
+3. 🚫 Запрещен спам и реклама
+4. 💡 Делитесь интересными находками
+5. 🌟 Наслаждайтесь контентом!
+
+*Наша миссия:* делиться самым первым и важным!
+    """
+    
+    bot.reply_to(message, rules_text, parse_mode='Markdown')
+
 class DatabaseManager:
     def __init__(self):
         self.init_db()
@@ -488,4 +571,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
