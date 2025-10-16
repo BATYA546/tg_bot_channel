@@ -192,50 +192,39 @@ editing_posts = {}
 
 def send_formatted_message(chat_id, text):
     """Умная отправка сообщений с форматированием"""
-    # Заменяем \n на настоящие переносы строк
-    text = text.replace('\\n', '\n')
-    
     try:
-        # Пробуем Markdown
-        bot.send_message(chat_id, text, parse_mode='Markdown')
+        # Сначала пробуем отправить как есть (без форматирования)
+        bot.send_message(chat_id, text, parse_mode=None)
         return True
-    except:
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки сообщения: {e}")
         try:
-            # Пробуем HTML
-            html_text = text
-            html_text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', html_text)
-            html_text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', html_text)
-            html_text = re.sub(r'__(.*?)__', r'<u>\1</u>', html_text)
-            bot.send_message(chat_id, html_text, parse_mode='HTML')
-            return True
-        except:
-            # Отправляем как простой текст
-            bot.send_message(chat_id, text, parse_mode=None)
-            return True
-
-def publish_approved_post(content_id):
-    """Публикует одобренный пост в канал"""
-    try:
-        # Получаем контент из базы
-        conn = db.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT content FROM found_content WHERE id = %s', (content_id,))
-        result = cursor.fetchone()
-        
-        if result:
-            full_post_text = result[0]  # Берем ПОЛНЫЙ текст из поля content
+            # Если не получается, разбиваем на части
+            if len(text) > 4000:
+                parts = []
+                lines = text.split('\n')
+                current_part = ""
+                
+                for line in lines:
+                    if len(current_part + line) < 4000:
+                        current_part += line + "\n"
+                    else:
+                        parts.append(current_part)
+                        current_part = line + "\n"
+                
+                if current_part:
+                    parts.append(current_part)
+                
+                for part in parts:
+                    bot.send_message(chat_id, part, parse_mode=None)
+                    time.sleep(0.5)
+            else:
+                bot.send_message(chat_id, text, parse_mode=None)
             
-            # Публикуем в канал
-            success = send_formatted_message(CHANNEL_ID, full_post_text)
-            
-            if success:
-                # Отмечаем как опубликованный
-                cursor.execute('UPDATE found_content SET is_published = TRUE WHERE id = %s', (content_id,))
-                conn.commit()
-                logger.info(f"✅ Пост {content_id} опубликован в канале")
-                return True
-        
-        return False
+            return True
+        except Exception as e2:
+            logger.error(f"❌ Критическая ошибка отправки: {e2}")
+            return False
         
     except Exception as e:
         logger.error(f"❌ Ошибка публикации поста {content_id}: {e}")
@@ -516,21 +505,9 @@ def find_content_command(message):
         
         if found_content:
             for content in found_content:
-                # ОТЛАДОЧНАЯ ИНФОРМАЦИЯ
-                logger.info(f"📝 Контент перед сохранением: {content['summary'][:100]}...")
-                
-                # Сохраняем в базу
                 content_id = db.add_found_content(content)
                 
-                # Проверяем что сохранилось в базе
-                conn = db.get_connection()
-                cursor = conn.cursor()
-                cursor.execute('SELECT content FROM found_content WHERE id = %s', (content_id,))
-                saved_content = cursor.fetchone()
-                if saved_content:
-                    logger.info(f"💾 Контент после сохранения: {saved_content[0][:100]}...")
-                
-                # Форматируем превью
+                # Форматируем превью БЕЗ Markdown
                 preview = finder.format_for_preview(content)
                 
                 # Создаем клавиатуру
@@ -541,11 +518,11 @@ def find_content_command(message):
                     telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
                 )
                 
-                # Отправляем сообщение с кнопками
+                # Отправляем сообщение с кнопками БЕЗ Markdown
                 bot.send_message(
                     message.chat.id, 
                     preview, 
-                    parse_mode='Markdown',
+                    parse_mode=None,  # ВАЖНО: отключаем Markdown
                     reply_markup=markup
                 )
                 time.sleep(1)
@@ -619,13 +596,8 @@ def handle_callback(call):
                 success = publish_approved_post(content_id)
                 
                 if success:
-                    final_text = f"""
-✅ *ПОСТ ОПУБЛИКОВАН В КАНАЛЕ*
-
-{full_post_text}
-
-📢 Сообщение успешно отправлено в канал!
-                    """
+                    # Вместо полного текста показываем короткое подтверждение
+                    final_text = "✅ *ПОСТ УСПЕШНО ОПУБЛИКОВАН В КАНАЛЕ!* 📢"
                 else:
                     final_text = "❌ Ошибка публикации поста"
                 
@@ -663,27 +635,25 @@ def handle_callback(call):
                 # Сохраняем в памяти для редактирования
                 editing_posts[call.message.chat.id] = content_id
                 
-                # Показываем полный текст для редактирования
-                edit_message = f"""
-✏️ *РЕДАКТИРОВАНИЕ ПОСТА #{content_id}*
+                # Показываем полный текст для редактирования БЕЗ Markdown
+                edit_message = f"""✏️ РЕДАКТИРОВАНИЕ ПОСТА #{content_id}
 
-*Текущий текст:*
+Текущий текст:
 {full_post_text}
 
-📝 *Отправьте исправленный текст:*
-                """
+📝 Отправьте исправленный текст:"""
                 
                 bot.edit_message_text(
                     chat_id=call.message.chat.id,
                     message_id=call.message.message_id,
-                    text="✏️ *Режим редактирования*",
-                    parse_mode='Markdown'
+                    text="✏️ Режим редактирования",
+                    parse_mode=None
                 )
                 
                 bot.send_message(
                     call.message.chat.id,
                     edit_message,
-                    parse_mode='Markdown'
+                    parse_mode=None
                 )
             
     except Exception as e:
@@ -757,4 +727,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
