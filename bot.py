@@ -1,11 +1,14 @@
 import os
 import logging
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, ChatMemberHandler
-from telegram.constants import ParseMode
-from datetime import datetime
+import sqlite3
+import threading
+import time
+import random
+import requests
+import re
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+import telebot
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
@@ -18,393 +21,309 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация из переменных окружения
+# Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
-ADMIN_ID = int(os.getenv('ADMIN_ID'))
-DATABASE_URL = os.getenv('DATABASE_URL')
+CHANNEL_ID = os.getenv('CHANNEL_ID')
+ADMIN_ID = os.getenv('ADMIN_ID')
 
-# Проверка обязательных переменных
-if not all([BOT_TOKEN, CHANNEL_ID, ADMIN_ID]):
-    raise ValueError("Missing required environment variables!")
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# SQLite настройки
+def adapt_datetime(dt):
+    return dt.isoformat()
+
+def convert_datetime(text):
+    return datetime.fromisoformat(text.decode())
+
+sqlite3.register_adapter(datetime, adapt_datetime)
+sqlite3.register_converter("DATETIME", convert_datetime)
 
 class DatabaseManager:
     def __init__(self):
-        self.conn = None
         self.init_db()
-    
-    def get_connection(self):
-        """Создает соединение с PostgreSQL"""
-        if self.conn is None or self.conn.closed:
-            if DATABASE_URL:
-                # Для Railway PostgreSQL
-                self.conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-            else:
-                # Для локальной разработки
-                self.conn = psycopg2.connect(
-                    host='localhost',
-                    database='telegram_bot',
-                    user='postgres',
-                    password='password'
-                )
-        return self.conn
     
     def init_db(self):
         """Инициализация базы данных"""
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS scheduled_posts (
-                    id SERIAL PRIMARY KEY,
-                    message_text TEXT,
-                    image_url TEXT,
-                    scheduled_time TIMESTAMP,
-                    is_published BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            conn.commit()
-            logger.info("Database initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing database: {e}")
-            raise
+        conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scheduled_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_text TEXT,
+                scheduled_time DATETIME,
+                is_published BOOLEAN DEFAULT FALSE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully")
 
-    def save_scheduled_post(self, message_text, image_url, scheduled_time):
+    def save_scheduled_post(self, message_text, scheduled_time):
         """Сохраняет пост в базу данных"""
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO scheduled_posts (message_text, image_url, scheduled_time)
-                VALUES (%s, %s, %s)
-                RETURNING id
-            ''', (message_text, image_url, scheduled_time))
-            conn.commit()
-            post_id = cursor.fetchone()[0]
-            return post_id
-        except Exception as e:
-            logger.error(f"Error saving post: {e}")
-            raise
+        conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO scheduled_posts (message_text, scheduled_time)
+            VALUES (?, ?)
+        ''', (message_text, scheduled_time))
+        conn.commit()
+        post_id = cursor.lastrowid
+        conn.close()
+        return post_id
     
     def get_pending_posts(self):
         """Получает неопубликованные посты"""
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute('''
-                SELECT id, message_text, image_url, scheduled_time 
-                FROM scheduled_posts 
-                WHERE is_published = FALSE AND scheduled_time > %s
-                ORDER BY scheduled_time
-            ''', (datetime.now(),))
-            posts = cursor.fetchall()
-            return posts
-        except Exception as e:
-            logger.error(f"Error getting pending posts: {e}")
-            return []
+        conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, message_text, scheduled_time 
+            FROM scheduled_posts 
+            WHERE is_published = FALSE
+            ORDER BY scheduled_time
+        ''')
+        posts = cursor.fetchall()
+        conn.close()
+        return posts
     
     def mark_as_published(self, post_id):
         """Отмечает пост как опубликованный"""
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE scheduled_posts 
-                SET is_published = TRUE 
-                WHERE id = %s
-            ''', (post_id,))
-            conn.commit()
-        except Exception as e:
-            logger.error(f"Error marking post as published: {e}")
+        conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE scheduled_posts 
+            SET is_published = TRUE 
+            WHERE id = ?
+        ''', (post_id,))
+        conn.commit()
+        conn.close()
 
-# Инициализация менеджера БД
+# Инициализация БД
 db = DatabaseManager()
 
-async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Приветствует новых участников в канале."""
+def publish_scheduled_posts():
+    """Публикует запланированные посты"""
     try:
-        if update.chat_member is None:
-            return
-
-        new_status = update.chat_member.new_chat_member.status
-        old_status = update.chat_member.old_chat_member.status
-
-        # Проверяем, что пользователь только что присоединился
-        if (old_status == 'left' and new_status in ['member', 'administrator', 'creator']):
-            user = update.chat_member.new_chat_member.user
-            chat_id = update.chat_member.chat.id
-
-            # Проверяем, что это наш канал
-            if chat_id == CHANNEL_ID:
-                welcome_text = f"""
-🎉 Добро пожаловать в наш канал, [{user.first_name}](tg://user?id={user.id})!
-
-Рады видеть тебя здесь! Ознакомься с закреплённым постом, чтобы узнать правила и полезные ссылки.
-
-Не стесняйся задавать вопросы! 🤖
-                """
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=welcome_text,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=True
-                )
-                logger.info(f"Приветствовал нового пользователя: {user.first_name}")
-    except Exception as e:
-        logger.error(f"Error in welcome_new_member: {e}")
-
-async def publish_scheduled_post(context: ContextTypes.DEFAULT_TYPE):
-    """Публикует запланированный пост."""
-    try:
-        job = context.job
-        post_data = job.data
-        post_id = post_data['post_id']
-
-        await context.bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=post_data['message_text'],
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True
-        )
+        posts = db.get_pending_posts()
+        now = datetime.now()
         
-        # Отмечаем как опубликованный
-        db.mark_as_published(post_id)
-        logger.info(f"Опубликован запланированный пост ID: {post_id}")
+        published_count = 0
+        for post in posts:
+            post_id, message_text, scheduled_time = post
+            
+            # Публикуем если время наступило ИЛИ прошло
+            if scheduled_time <= now:
+                try:
+                    bot.send_message(CHANNEL_ID, message_text)
+                    db.mark_as_published(post_id)
+                    published_count += 1
+                    logger.info(f"✅ Опубликован запланированный пост ID: {post_id}")
+                    
+                    # Пауза между публикациями
+                    time.sleep(1)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка публикации поста {post_id}: {e}")
         
+        if published_count > 0:
+            logger.info(f"📤 Опубликовано {published_count} постов")
+                
     except Exception as e:
-        logger.error(f"Ошибка при публикации поста: {e}")
+        logger.error(f"❌ Ошибка в publish_scheduled_posts: {e}")
 
-async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Немедленная публикация поста."""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ У вас нет прав для выполнения этой команды.")
-        return
-
-    # Получаем полный текст сообщения
-    full_text = update.message.text
-    logger.info(f"Received command: {full_text}")
-
-    # Проверяем есть ли аргументы после команды
-    if not full_text or len(full_text.strip()) <= len('/post_now'):
-        await update.message.reply_text(
-            "Использование: /post_now \"Текст поста\"\n\n"
-            "Пример:\n"
-            '/post_now "Привет, это тестовый пост!"'
-        )
-        return
-
-    # Извлекаем текст поста (все что после /post_now)
-    command_parts = full_text.split(' ', 1)
-    if len(command_parts) < 2:
-        await update.message.reply_text("❌ Не указан текст поста!")
-        return
-
-    message_text = command_parts[1].strip()
+def post_scheduler():
+    """Планировщик постов"""
+    logger.info("🕒 Запущен планировщик постов...")
     
-    # Убираем кавычки если они есть
-    if message_text.startswith('"') and message_text.endswith('"'):
-        message_text = message_text[1:-1]
-    elif message_text.startswith('"') and message_text.endswith('"'):
-        message_text = message_text[1:-1]
+    while True:
+        try:
+            publish_scheduled_posts()
+            time.sleep(30)  # Проверяем каждые 30 секунд
+            
+        except Exception as e:
+            logger.error(f"💥 Ошибка в планировщике: {e}")
+            time.sleep(30)
 
-    if not message_text:
-        await update.message.reply_text("❌ Текст поста не может быть пустым!")
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    """Команда start"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+    
+    bot.reply_to(message,
+        "🤖 Бот для управления каналом запущен!\n\n"
+        "Команды:\n"
+        "/post_now текст - опубликовать сейчас\n"
+        "/schedule \"текст\" 2024-01-15 15:00 - запланировать\n"
+        "/list_posts - список постов\n"
+        "/help - справка\n\n"
+        "Примеры:\n"
+        "/post_now Привет мир!\n"
+        '/schedule "Важное сообщение" 2024-01-15 15:30'
+    )
+
+@bot.message_handler(commands=['post_now'])
+def post_now_command(message):
+    """Немедленная публикация поста"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
         return
 
-    logger.info(f"Publishing post: {message_text}")
+    text = message.text.replace('/post_now', '').strip()
+    
+    if not text:
+        bot.reply_to(message, 'Использование: /post_now Текст поста')
+        return
 
     try:
-        # Публикуем простой текстовый пост
-        await context.bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=message_text,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True
-        )
-        
-        await update.message.reply_text("✅ Пост успешно опубликован в канал!")
-        logger.info(f"Пост опубликован: {message_text[:50]}...")
-
+        bot.send_message(CHANNEL_ID, text)
+        bot.reply_to(message, "✅ Пост опубликован в канал!")
+        logger.info(f"Опубликован пост: {text[:50]}...")
     except Exception as e:
-        error_msg = f"❌ Ошибка при публикации: {str(e)}"
-        await update.message.reply_text(error_msg)
-        logger.error(f"Error in post_now: {e}")
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+        logger.error(f"Ошибка в post_now: {e}")
 
-async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для планирования поста."""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ У вас нет прав для выполнения этой команды.")
+@bot.message_handler(commands=['schedule'])
+def schedule_command(message):
+    """Планирование поста"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
         return
 
-    full_text = update.message.text
-    logger.info(f"Received schedule command: {full_text}")
-
-    # Базовая проверка
-    if not full_text or len(full_text.strip()) <= len('/schedule'):
-        await update.message.reply_text(
-            "Использование: /schedule \"Текст поста\" ГГГГ-ММ-ДД ЧЧ:ММ\n\n"
-            "Пример:\n"
-            '/schedule "Запланированный пост" 2024-01-15 15:00'
+    full_text = message.text.strip()
+    
+    if len(full_text) <= len('/schedule'):
+        bot.reply_to(message, 
+            'Использование: /schedule "Текст поста" ГГГГ-ММ-ДД ЧЧ:ММ\n\n'
+            'Примеры:\n'
+            '/schedule "Привет мир" 2024-01-15 15:30\n'
+            '/schedule "Важное объявление" 2024-01-15 16:00'
         )
         return
 
-    # Парсим команду вручную
     try:
-        # Убираем команду и разбиваем на части
-        parts = full_text[len('/schedule'):].strip().split('"')
+        command_rest = full_text[len('/schedule'):].strip()
         
-        if len(parts) < 3:
-            await update.message.reply_text("❌ Неправильный формат. Используйте кавычки для текста.")
-            return
+        if command_rest.startswith('"'):
+            parts = command_rest.split('"', 2)
+            if len(parts) < 3:
+                bot.reply_to(message, "❌ Используйте кавычки для текста: /schedule \"Текст\" дата время")
+                return
+                
+            message_text = parts[1].strip()
+            datetime_part = parts[2].strip()
+        else:
+            parts = command_rest.split()
+            if len(parts) < 3:
+                bot.reply_to(message, "❌ Недостаточно аргументов. Нужен текст, дата и время")
+                return
+                
+            message_text = ' '.join(parts[:-2])
+            datetime_part = ' '.join(parts[-2:])
 
-        message_text = parts[1].strip()  # Текст между кавычками
-        rest = parts[2].strip()  # Остальная часть (дата и время)
-        
         if not message_text:
-            await update.message.reply_text("❌ Текст поста не может быть пустым!")
+            bot.reply_to(message, "❌ Текст поста не может быть пустым!")
             return
 
-        # Парсим дату и время
-        datetime_parts = rest.split()
+        datetime_parts = datetime_part.split()
         if len(datetime_parts) < 2:
-            await update.message.reply_text("❌ Укажите дату и время: ГГГГ-ММ-ДД ЧЧ:ММ")
+            bot.reply_to(message, "❌ Укажите дату И время: ГГГГ-ММ-ДД ЧЧ:ММ")
             return
 
         date_str = datetime_parts[0]
         time_str = datetime_parts[1]
-        
-        scheduled_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-        now = datetime.now()
 
-        if scheduled_time <= now:
-            await update.message.reply_text("❌ Время публикации должно быть в будущем!")
+        scheduled_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        
+        if scheduled_time <= datetime.now():
+            bot.reply_to(message, "❌ Укажите будущее время!")
             return
 
-        # Сохраняем пост в БД (без картинки)
-        post_id = db.save_scheduled_post(message_text, None, scheduled_time)
-
-        # Создаем задачу
-        time_delta = scheduled_time - now
-        seconds_until_post = time_delta.total_seconds()
-
-        context.job_queue.run_once(
-            publish_scheduled_post,
-            seconds_until_post,
-            data={
-                'message_text': message_text, 
-                'image_url': None,
-                'post_id': post_id
-            },
-            name=str(post_id)
+        post_id = db.save_scheduled_post(message_text, scheduled_time)
+        
+        bot.reply_to(message, 
+            f"✅ Пост запланирован!\n"
+            f"🆔 ID: {post_id}\n"
+            f"📅 Когда: {scheduled_time.strftime('%d.%m.%Y в %H:%M')}\n"
+            f"📝 Текст: {message_text[:80]}..."
         )
-
-        await update.message.reply_text(
-            f"✅ Пост запланирован на {scheduled_time.strftime('%d.%m.%Y в %H:%M')}\n"
-            f"📝 Текст: {message_text[:100]}..."
-        )
-        logger.info(f"Запланирован новый пост ID: {post_id}")
-
+        logger.info(f"Запланирован пост ID: {post_id} на {scheduled_time}")
+        
     except ValueError as e:
-        await update.message.reply_text(f"❌ Ошибка в формате даты/времени. Используйте: ГГГГ-ММ-ДД ЧЧ:ММ\nОшибка: {e}")
+        bot.reply_to(message, 
+            f"❌ Неверный формат даты или времени!\n"
+            f"Используйте: ГГГГ-ММ-ДД ЧЧ:ММ\n"
+            f"Пример: 2024-01-15 15:30"
+        )
+        logger.error(f"Ошибка формата даты: {e}")
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-        logger.error(f"Error in schedule_post: {e}")
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+        logger.error(f"Ошибка в schedule_command: {e}")
 
-async def list_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает запланированные посты."""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ У вас нет прав для выполнения этой команды.")
+@bot.message_handler(commands=['list_posts'])
+def list_posts_command(message):
+    """Список запланированных постов"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
         return
 
     posts = db.get_pending_posts()
     
     if not posts:
-        await update.message.reply_text("📭 Нет запланированных постов.")
+        bot.reply_to(message, "📭 Нет запланированных постов")
         return
 
-    message = "📅 Запланированные посты:\n\n"
+    response = "📅 Запланированные посты:\n\n"
     for post in posts:
-        message += f"🆔 {post['id']}\n"
-        message += f"📅 {post['scheduled_time'].strftime('%d.%m.%Y %H:%M')}\n"
-        message += f"📝 {post['message_text'][:50]}...\n"
-        message += "─" * 30 + "\n"
+        post_id, text, post_time = post
+        time_str = post_time.strftime('%d.%m.%Y %H:%M')
+        time_left = (post_time - datetime.now()).total_seconds()
+        
+        status = "✅ ГОТОВ" if time_left <= 0 else f"⏳ {int(time_left/60)} мин"
+        response += f"🆔 {post_id} | {status}\n"
+        response += f"📅 {time_str}\n"
+        response += f"📝 {text[:60]}...\n"
+        response += "─" * 40 + "\n"
 
-    await update.message.reply_text(message)
+    bot.reply_to(message, response)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда start"""
-    await update.message.reply_text(
-        "🤖 Бот для управления каналом запущен!\n\n"
-        "Доступные команды:\n"
-        "/schedule - запланировать пост\n"
-        "/post_now - опубликовать сейчас\n"
-        "/list_posts - список запланированных постов\n\n"
-        "Примеры:\n"
-        '/schedule "Привет мир" 2024-01-15 15:00\n'
-        '/post_now "Срочная новость"'
+@bot.message_handler(commands=['help'])
+def help_command(message):
+    """Команда помощи"""
+    bot.reply_to(message,
+        "📖 Доступные команды:\n\n"
+        "/start - начать работу\n"
+        "/post_now [текст] - опубликовать пост сейчас\n"
+        "/schedule [текст] [дата] [время] - запланировать пост\n"
+        "/list_posts - показать запланированные посты\n"
+        "/help - эта справка\n\n"
+        "📅 Формат даты: ГГГГ-ММ-ДД ЧЧ:ММ\n"
+        "Пример: /schedule \"Важное сообщение\" 2024-01-15 17:00"
     )
 
-async def load_scheduled_posts(application: Application):
-    """Загружает неопубликованные посты при старте бота."""
-    try:
-        posts = db.get_pending_posts()
-        loaded_count = 0
-        
-        for post in posts:
-            scheduled_time = post['scheduled_time']
-            time_delta = scheduled_time - datetime.now()
-            seconds_until_post = time_delta.total_seconds()
-
-            if seconds_until_post > 0:
-                application.job_queue.run_once(
-                    publish_scheduled_post,
-                    seconds_until_post,
-                    data={
-                        'message_text': post['message_text'], 
-                        'image_url': post['image_url'],
-                        'post_id': post['id']
-                    },
-                    name=str(post['id'])
-                )
-                loaded_count += 1
-                logger.info(f"Загружен запланированный пост ID: {post['id']}")
-            else:
-                # Если время уже прошло, отмечаем как опубликованный
-                db.mark_as_published(post['id'])
-                logger.info(f"Пропущен просроченный пост ID: {post['id']}")
-                
-        logger.info(f"Загружено {loaded_count} запланированных постов")
-    except Exception as e:
-        logger.error(f"Error loading scheduled posts: {e}")
-
 def main():
-    """Основная функция"""
+    """Запуск бота"""
+    logger.info("🚀 Запуск бота...")
+    
+    # Проверяем переменные окружения
+    if not all([BOT_TOKEN, CHANNEL_ID, ADMIN_ID]):
+        logger.error("❌ Не все переменные окружения установлены!")
+        logger.error(f"BOT_TOKEN: {'✅' if BOT_TOKEN else '❌'}")
+        logger.error(f"CHANNEL_ID: {'✅' if CHANNEL_ID else '❌'}")
+        logger.error(f"ADMIN_ID: {'✅' if ADMIN_ID else '❌'}")
+        return
+    
+    # Запускаем планировщик
+    scheduler_thread = threading.Thread(target=post_scheduler, daemon=True)
+    scheduler_thread.start()
+    
+    # Запускаем бота
+    logger.info("Бот готов к работе! Используйте /start в Telegram")
     try:
-        # Создаем приложение
-        application = Application.builder().token(BOT_TOKEN).build()
-
-        # Добавляем обработчики
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("schedule", schedule_post))
-        application.add_handler(CommandHandler("post_now", post_now))
-        application.add_handler(CommandHandler("list_posts", list_posts))
-        application.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
-
-        # Загружаем запланированные посты при старте
-        application.job_queue.run_once(
-            lambda ctx: load_scheduled_posts(application), 
-            5
-        )
-
-        # Запускаем бота
-        logger.info("Бот запускается...")
-        application.run_polling()
-        
+        bot.polling(none_stop=True, interval=1)
     except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-        raise
+        logger.error(f"Ошибка при запуске бота: {e}")
 
 if __name__ == '__main__':
     main()
-
