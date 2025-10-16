@@ -8,56 +8,6 @@ import telebot
 from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from content_finder import setup_content_finder
-import schedule
-import threading
-
-def auto_content_scheduler():
-    """Автоматический поиск и публикация контента"""
-    logger.info("⏰ Запущен автоматический планировщик контента")
-    
-    def job():
-        try:
-            if CONTENT_FINDER_AVAILABLE:
-                logger.info("🔄 Автоматический поиск контента...")
-                finder = setup_content_finder()
-                found_content = finder.search_content(max_posts=1)  # 1 пост за раз
-                
-                if found_content:
-                    content = found_content[0]
-                    content_id = db.add_found_content(content)
-                    
-                    # Сразу публикуем в канал (можно изменить на модерацию)
-                    success = publish_approved_post(content_id)
-                    
-                    if success:
-                        logger.info(f"✅ Автопост {content_id} опубликован")
-                    else:
-                        logger.error(f"❌ Ошибка автопубликации {content_id}")
-                        
-        except Exception as e:
-            logger.error(f"❌ Ошибка автоматического планировщика: {e}")
-    
-    # Настраиваем расписание (2 раза в день)
-    schedule.every().day.at("10:00").do(job)
-    schedule.every().day.at("18:00").do(job)
-    
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
-
-# Запускаем планировщик в отдельном потоке
-def start_scheduler():
-    scheduler_thread = threading.Thread(target=auto_content_scheduler, daemon=True)
-    scheduler_thread.start()
-    logger.info("✅ Автопланировщик контента запущен")
-# В импорты добавляем:
-try:
-    from content_finder import setup_content_finder
-    CONTENT_FINDER_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"❌ ContentFinder не доступен: {e}")
-    CONTENT_FINDER_AVAILABLE = False
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -79,6 +29,14 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 # Исправление часового пояса (UTC+3 для Москвы)
 TIMEZONE_OFFSET = 3
+
+# Импорт content_finder
+try:
+    from content_finder import setup_content_finder
+    CONTENT_FINDER_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"❌ ContentFinder не доступен: {e}")
+    CONTENT_FINDER_AVAILABLE = False
 
 def get_current_time():
     """Возвращает текущее время с поправкой на часовой пояс"""
@@ -184,7 +142,6 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Error marking post: {e}")
 
-    # ДОБАВЛЯЕМ ЭТОТ МЕТОД - найденный контент
     def add_found_content(self, content_data):
         """Сохраняет найденный контент в базу"""
         try:
@@ -211,7 +168,6 @@ class DatabaseManager:
             logger.error(f"❌ Error saving found content: {e}")
             raise
 
-    # Дополнительный метод для получения контента по ID
     def get_found_content(self, content_id):
         """Получает найденный контент по ID"""
         try:
@@ -231,229 +187,8 @@ class DatabaseManager:
 # Инициализация БД
 db = DatabaseManager()
 
-# В класс DatabaseManager добавляем:
-def add_found_content(self, content_data):
-    """Сохраняет найденный контент в базу"""
-    try:
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        # Создаем таблицу если не существует
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS found_content (
-                id SERIAL PRIMARY KEY,
-                title TEXT,
-                content TEXT,
-                category VARCHAR(50),
-                source VARCHAR(100),
-                url TEXT,
-                image_url TEXT,
-                is_approved BOOLEAN DEFAULT FALSE,
-                is_published BOOLEAN DEFAULT FALSE,
-                found_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        cursor.execute('''
-            INSERT INTO found_content (title, content, category, source, url)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id
-        ''', (content_data['title'], content_data['summary'], 
-              content_data['category'], content_data['source'], 
-              content_data['url']))
-        
-        conn.commit()
-        content_id = cursor.fetchone()[0]
-        logger.info(f"✅ Сохранен найденный контент ID: {content_id}")
-        return content_id
-        
-    except Exception as e:
-        logger.error(f"❌ Error saving found content: {e}")
-        raise
-
-# В bot.py добавляем новые методы
-
-def publish_approved_post(content_id):
-    """Публикует одобренный пост в канал"""
-    try:
-        # Получаем контент из базы
-        conn = db.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT title, content FROM found_content WHERE id = %s', (content_id,))
-        result = cursor.fetchone()
-        
-        if result:
-            title, content = result
-            
-            # Публикуем в канал
-            success = send_formatted_message(CHANNEL_ID, content)
-            
-            if success:
-                # Отмечаем как опубликованный
-                cursor.execute('UPDATE found_content SET is_published = TRUE WHERE id = %s', (content_id,))
-                conn.commit()
-                logger.info(f"✅ Пост {content_id} опубликован в канале")
-                return True
-        
-        return False
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка публикации поста {content_id}: {e}")
-        return False
-
-# Обновляем обработчик callback для автоматической публикации
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    """Обработчик нажатий на инлайн-кнопки"""
-    try:
-        if call.data.startswith('approve_'):
-            content_id = int(call.data.split('_')[1])
-            bot.answer_callback_query(call.id, "✅ Контент одобрен!")
-            
-            # Получаем полный текст из базы
-            conn = db.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('SELECT title, content FROM found_content WHERE id = %s', (content_id,))
-            result = cursor.fetchone()
-            
-            if result:
-                title, full_text = result
-                
-                # Сразу публикуем в канал
-                success = publish_approved_post(content_id)
-                
-                if success:
-                    final_text = f"""
-✅ *ПОСТ ОПУБЛИКОВАН В КАНАЛЕ*
-
-{full_text}
-
-📢 Сообщение успешно отправлено в канал!
-                    """
-                else:
-                    final_text = "❌ Ошибка публикации поста"
-                
-                bot.edit_message_text(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    text=final_text,
-                    parse_mode='Markdown'
-                )
-            
-        elif call.data.startswith('reject_'):
-            content_id = int(call.data.split('_')[1])
-            bot.answer_callback_query(call.id, "❌ Контент отклонен")
-            
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text="❌ *Контент отклонен*",
-                parse_mode='Markdown'
-            )
-            
-        elif call.data.startswith('edit_'):
-            content_id = int(call.data.split('_')[1])
-            bot.answer_callback_query(call.id, "✏️ Загружаем полный текст...")
-            
-            # Получаем полный текст из базы
-            conn = db.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('SELECT title, content FROM found_content WHERE id = %s', (content_id,))
-            result = cursor.fetchone()
-            
-            if result:
-                title, full_text = result
-                
-                # Сохраняем в памяти для редактирования
-                editing_posts[call.message.chat.id] = content_id
-                
-                # Показываем полный текст для редактирования
-                edit_message = f"""
-✏️ *РЕДАКТИРОВАНИЕ ПОСТА #{content_id}*
-
-*Текущий текст:*
-{full_text}
-
-📝 *Отправьте исправленный текст:*
-                """
-                
-                bot.edit_message_text(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    text="✏️ *Режим редактирования*",
-                    parse_mode='Markdown'
-                )
-                
-                bot.send_message(
-                    call.message.chat.id,
-                    edit_message,
-                    parse_mode='Markdown'
-                )
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка обработки callback: {e}")
-        bot.answer_callback_query(call.id, "❌ Ошибка обработки")
-
-
-# Добавляем команду для ручного поиска контента
-@bot.message_handler(commands=['find_content'])
-def find_content_command(message):
-    """Ручной поиск контента"""
-    if str(message.from_user.id) != ADMIN_ID:
-        bot.reply_to(message, "⛔ Нет прав!")
-        return
-
-    if not CONTENT_FINDER_AVAILABLE:
-        bot.reply_to(message, "❌ Модуль поиска контента не доступен")
-        return
-
-    try:
-        bot.reply_to(message, "🔍 Начинаю поиск контента...")
-        
-        finder = setup_content_finder()
-        found_content = finder.search_content(max_posts=3)
-        
-        if found_content:
-            for content in found_content:
-                content_id = db.add_found_content(content)
-                
-                preview = finder.format_for_preview(content)
-                
-                # Создаем клавиатуру
-                markup = telebot.types.InlineKeyboardMarkup()
-                markup.row(
-                    telebot.types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{content_id}"),
-                    telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
-                    telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
-                )
-                
-                bot.send_message(
-                    message.chat.id, 
-                    preview, 
-                    parse_mode='Markdown',
-                    reply_markup=markup
-                )
-            
-            bot.reply_to(message, f"✅ Найдено {len(found_content)} материалов. Проверьте предложения выше!")
-        else:
-            bot.reply_to(message, "❌ Не найдено подходящего контента.")
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка поиска контента: {e}")
-        bot.reply_to(message, f"❌ Ошибка поиска: {e}")
-
-def create_moderation_keyboard(content_id):
-    """Создает клавиатуру для модерации"""
-    markup = telebot.types.InlineKeyboardMarkup()
-    markup.row(
-        telebot.types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{content_id}"),
-        telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
-        telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
-    )
-    return markup
-
-# Инициализация БД
-db = DatabaseManager()
+# Словарь для хранения редактируемых постов
+editing_posts = {}
 
 def send_formatted_message(chat_id, text):
     """Умная отправка сообщений с форматированием"""
@@ -477,6 +212,34 @@ def send_formatted_message(chat_id, text):
             # Отправляем как простой текст
             bot.send_message(chat_id, text, parse_mode=None)
             return True
+
+def publish_approved_post(content_id):
+    """Публикует одобренный пост в канал"""
+    try:
+        # Получаем контент из базы
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT content FROM found_content WHERE id = %s', (content_id,))
+        result = cursor.fetchone()
+        
+        if result:
+            full_post_text = result[0]  # Берем ПОЛНЫЙ текст из поля content
+            
+            # Публикуем в канал
+            success = send_formatted_message(CHANNEL_ID, full_post_text)
+            
+            if success:
+                # Отмечаем как опубликованный
+                cursor.execute('UPDATE found_content SET is_published = TRUE WHERE id = %s', (content_id,))
+                conn.commit()
+                logger.info(f"✅ Пост {content_id} опубликован в канале")
+                return True
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка публикации поста {content_id}: {e}")
+        return False
 
 def publish_scheduled_posts():
     """Публикует запланированные посты"""
@@ -517,6 +280,49 @@ def post_scheduler():
             logger.error(f"💥 Ошибка планировщика: {e}")
             time.sleep(30)
 
+def auto_content_scheduler():
+    """Автоматический поиск и публикация контента"""
+    logger.info("⏰ Запущен автоматический планировщик контента")
+    
+    def job():
+        try:
+            if CONTENT_FINDER_AVAILABLE:
+                logger.info("🔄 Автоматический поиск контента...")
+                finder = setup_content_finder()
+                found_content = finder.search_content(max_posts=1)  # 1 пост за раз
+                
+                if found_content:
+                    content = found_content[0]
+                    content_id = db.add_found_content(content)
+                    
+                    # Сразу публикуем в канал
+                    success = publish_approved_post(content_id)
+                    
+                    if success:
+                        logger.info(f"✅ Автопост {content_id} опубликован")
+                    else:
+                        logger.error(f"❌ Ошибка автопубликации {content_id}")
+                        
+        except Exception as e:
+            logger.error(f"❌ Ошибка автоматического планировщика: {e}")
+    
+    # Временное решение: запускать каждые 10 минут для теста
+    while True:
+        job()  # Запускаем сразу
+        time.sleep(600)  # Ждем 10 минут
+
+def start_scheduler():
+    """Запускает все планировщики"""
+    # Запускаем планировщик постов
+    post_scheduler_thread = threading.Thread(target=post_scheduler, daemon=True)
+    post_scheduler_thread.start()
+    
+    # Запускаем автопланировщик контента
+    auto_scheduler_thread = threading.Thread(target=auto_content_scheduler, daemon=True)
+    auto_scheduler_thread.start()
+    
+    logger.info("✅ Все планировщики запущены")
+
 def safe_polling():
     """Безопасный запуск бота"""
     while True:
@@ -546,6 +352,8 @@ def start_command(message):
 /schedule - запланировать пост  
 /list_posts - список постов
 /stats - статистика
+/find_content - найти контент
+/view_found - просмотреть найденные посты
 
 📝 <b>Пример:</b>
 /schedule "<b>Важно</b> сообщение" 2024-01-15 15:30
@@ -668,12 +476,16 @@ def stats_command(message):
         cursor.execute('SELECT COUNT(*) FROM scheduled_posts WHERE is_published = TRUE')
         published_count = cursor.fetchone()[0]
         
+        cursor.execute('SELECT COUNT(*) FROM found_content WHERE is_published = TRUE')
+        auto_published_count = cursor.fetchone()[0]
+        
         stats_text = f"""
 📊 *Статистика бота:*
 
 🗃️ *База данных:* ✅ PostgreSQL
 📊 *Публикации:*
-✅ Опубликовано: {published_count}
+✅ Опубликовано вручную: {published_count}
+🤖 Опубликовано авто: {auto_published_count}
 ⏳ В ожидании: {pending_count}
 
 ⏰ *Время:* {current_time.strftime('%H:%M %d.%m.%Y')}
@@ -685,184 +497,56 @@ def stats_command(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка статистики: {e}")
 
-# Добавляем в bot.py новые команды и обработчики
+@bot.message_handler(commands=['find_content'])
+def find_content_command(message):
+    """Ручной поиск контента"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
 
-# Словарь для хранения редактируемых постов
-editing_posts = {}
+    if not CONTENT_FINDER_AVAILABLE:
+        bot.reply_to(message, "❌ Модуль поиска контента не доступен")
+        return
 
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    """Обработчик нажатий на инлайн-кнопки"""
     try:
-        if call.data.startswith('approve_'):
-            content_id = int(call.data.split('_')[1])
-            bot.answer_callback_query(call.id, "✅ Контент одобрен!")
-            
-            # Получаем полный текст из базы
-            conn = db.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('SELECT title, content FROM found_content WHERE id = %s', (content_id,))
-            result = cursor.fetchone()
-            
-            if result:
-                title, full_text = result
+        bot.reply_to(message, "🔍 Начинаю поиск контента...")
+        
+        finder = setup_content_finder()
+        found_content = finder.search_content(max_posts=3)
+        
+        if found_content:
+            for content in found_content:
+                # Сохраняем в базу
+                content_id = db.add_found_content(content)
                 
-                # Показываем финальную версию для подтверждения
-                final_text = f"""
-✅ *КОНТЕНТ ОДОБРЕН*
-
-*Заголовок:* {title}
-
-*Текст для публикации:*
-{full_text}
-
-📅 Пост будет опубликован в ближайшее время.
-                """
+                # Форматируем превью
+                preview = finder.format_for_preview(content)
                 
-                bot.edit_message_text(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    text=final_text,
-                    parse_mode='Markdown'
-                )
-            
-            logger.info(f"✅ Контент {content_id} одобрен для публикации")
-            
-        elif call.data.startswith('reject_'):
-            content_id = int(call.data.split('_')[1])
-            bot.answer_callback_query(call.id, "❌ Контент отклонен")
-            
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text="❌ *Контент отклонен*",
-                parse_mode='Markdown'
-            )
-            
-            logger.info(f"❌ Контент {content_id} отклонен")
-            
-        elif call.data.startswith('edit_'):
-            content_id = int(call.data.split('_')[1])
-            bot.answer_callback_query(call.id, "✏️ Загружаем полный текст...")
-            
-            # Получаем полный текст из базы
-            conn = db.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('SELECT title, content FROM found_content WHERE id = %s', (content_id,))
-            result = cursor.fetchone()
-            
-            if result:
-                title, full_text = result
-                
-                # Сохраняем в памяти для редактирования
-                editing_posts[call.message.chat.id] = content_id
-                
-                # Показываем полный текст для редактирования
-                edit_message = f"""
-✏️ *РЕДАКТИРОВАНИЕ ПОСТА #{content_id}*
-
-*Текущий заголовок:*
-{title}
-
-*Текущий текст:*
-{full_text}
-
-📝 *Отправьте новый текст в формате:*
-Заголовок
-(пустая строка)
-Текст поста
-
-*Пример:*
-Ученые создали революционный материал
-(пустая строка)
-Исследователи разработали уникальный материал, который может изменить будущее технологий. Это открытие позволит создавать более эффективные устройства.
-                """
-                
-                # Сначала редактируем исходное сообщение
-                bot.edit_message_text(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    text="✏️ *Режим редактирования*",
-                    parse_mode='Markdown'
+                # Создаем клавиатуру
+                markup = telebot.types.InlineKeyboardMarkup()
+                markup.row(
+                    telebot.types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{content_id}"),
+                    telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
+                    telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
                 )
                 
-                # Затем отправляем полный текст для редактирования
+                # Отправляем сообщение с кнопками
                 bot.send_message(
-                    call.message.chat.id,
-                    edit_message,
-                    parse_mode='Markdown'
+                    message.chat.id, 
+                    preview, 
+                    parse_mode='Markdown',
+                    reply_markup=markup
                 )
+                time.sleep(1)  # Пауза между отправками
             
-    except Exception as e:
-        logger.error(f"❌ Ошибка обработки callback: {e}")
-        bot.answer_callback_query(call.id, "❌ Ошибка обработки")
-
-# Добавляем обработчик текстовых сообщений для редактирования
-@bot.message_handler(func=lambda message: message.chat.id in editing_posts)
-def handle_edit_text(message):
-    """Обрабатывает редактирование текста поста"""
-    try:
-        content_id = editing_posts.pop(message.chat.id, None)
-        if not content_id:
-            return
-            
-        text = message.text.strip()
-        
-        # Парсим новый текст (разделяем заголовок и контент)
-        parts = text.split('\n\n', 1)
-        if len(parts) == 2:
-            new_title, new_content = parts[0].strip(), parts[1].strip()
+            bot.reply_to(message, f"✅ Найдено {len(found_content)} материалов. Проверьте предложения выше!")
         else:
-            # Если нет разделения, используем первую строку как заголовок
-            lines = text.split('\n')
-            new_title = lines[0].strip()
-            new_content = '\n'.join(lines[1:]).strip() if len(lines) > 1 else new_title
-        
-        # Обновляем в базе
-        conn = db.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE found_content 
-            SET title = %s, content = %s 
-            WHERE id = %s
-        ''', (new_title, new_content, content_id))
-        conn.commit()
-        
-        # Показываем обновленную версию
-        updated_preview = f"""
-✏️ *ТЕКСТ ОБНОВЛЕН*
-
-*Новый заголовок:*
-{new_title}
-
-*Новый текст:*
-{new_content}
-
-✅ Изменения сохранены. Теперь можете одобрить пост.
-        """
-        
-        # Создаем новую клавиатуру для обновленного поста
-        markup = telebot.types.InlineKeyboardMarkup()
-        markup.row(
-            telebot.types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{content_id}"),
-            telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
-            telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
-        )
-        
-        bot.send_message(
-            message.chat.id,
-            updated_preview,
-            parse_mode='Markdown',
-            reply_markup=markup
-        )
-        
-        logger.info(f"✏️ Контент {content_id} отредактирован")
-        
+            bot.reply_to(message, "❌ Не найдено подходящего контента.")
+            
     except Exception as e:
-        logger.error(f"❌ Ошибка редактирования: {e}")
-        bot.reply_to(message, f"❌ Ошибка при сохранении: {e}")
+        logger.error(f"❌ Ошибка поиска контента: {e}")
+        bot.reply_to(message, f"❌ Ошибка поиска: {e}")
 
-# Добавляем команду для просмотра всех найденных постов
 @bot.message_handler(commands=['view_found'])
 def view_found_command(message):
     """Показывает все найденные посты"""
@@ -903,8 +587,6 @@ def view_found_command(message):
         logger.error(f"❌ Ошибка просмотра постов: {e}")
         bot.reply_to(message, f"❌ Ошибка: {e}")
 
-
-# Добавляем после всех message_handler
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     """Обработчик нажатий на инлайн-кнопки"""
@@ -913,16 +595,35 @@ def handle_callback(call):
             content_id = int(call.data.split('_')[1])
             bot.answer_callback_query(call.id, "✅ Контент одобрен!")
             
-            # Обновляем сообщение
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text=f"✅ *Контент одобрен!*\n\nПост будет опубликован в ближайшее время.",
-                parse_mode='Markdown'
-            )
+            # Получаем полный текст из базы
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT content FROM found_content WHERE id = %s', (content_id,))
+            result = cursor.fetchone()
             
-            # TODO: Добавить в очередь на публикацию
-            logger.info(f"✅ Контент {content_id} одобрен для публикации")
+            if result:
+                full_post_text = result[0]
+                
+                # Сразу публикуем в канал
+                success = publish_approved_post(content_id)
+                
+                if success:
+                    final_text = f"""
+✅ *ПОСТ ОПУБЛИКОВАН В КАНАЛЕ*
+
+{full_post_text}
+
+📢 Сообщение успешно отправлено в канал!
+                    """
+                else:
+                    final_text = "❌ Ошибка публикации поста"
+                
+                bot.edit_message_text(
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                    text=final_text,
+                    parse_mode='Markdown'
+                )
             
         elif call.data.startswith('reject_'):
             content_id = int(call.data.split('_')[1])
@@ -935,21 +636,98 @@ def handle_callback(call):
                 parse_mode='Markdown'
             )
             
-            logger.info(f"❌ Контент {content_id} отклонен")
-            
         elif call.data.startswith('edit_'):
             content_id = int(call.data.split('_')[1])
-            bot.answer_callback_query(call.id, "✏️ Режим редактирования")
+            bot.answer_callback_query(call.id, "✏️ Загружаем полный текст...")
             
-            # Сохраняем ID для редактирования
-            bot.send_message(
-                call.message.chat.id,
-                f"✏️ Режим редактирования для контента #{content_id}\n\nОтправьте новый текст:"
-            )
+            # Получаем полный текст из базы
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT content FROM found_content WHERE id = %s', (content_id,))
+            result = cursor.fetchone()
+            
+            if result:
+                full_post_text = result[0]
+                
+                # Сохраняем в памяти для редактирования
+                editing_posts[call.message.chat.id] = content_id
+                
+                # Показываем полный текст для редактирования
+                edit_message = f"""
+✏️ *РЕДАКТИРОВАНИЕ ПОСТА #{content_id}*
+
+*Текущий текст:*
+{full_post_text}
+
+📝 *Отправьте исправленный текст:*
+                """
+                
+                bot.edit_message_text(
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                    text="✏️ *Режим редактирования*",
+                    parse_mode='Markdown'
+                )
+                
+                bot.send_message(
+                    call.message.chat.id,
+                    edit_message,
+                    parse_mode='Markdown'
+                )
             
     except Exception as e:
         logger.error(f"❌ Ошибка обработки callback: {e}")
         bot.answer_callback_query(call.id, "❌ Ошибка обработки")
+
+@bot.message_handler(func=lambda message: message.chat.id in editing_posts)
+def handle_edit_text(message):
+    """Обрабатывает редактирование текста поста"""
+    try:
+        content_id = editing_posts.pop(message.chat.id, None)
+        if not content_id:
+            return
+            
+        new_content = message.text.strip()
+        
+        # Обновляем в базе - сохраняем весь текст как есть
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE found_content 
+            SET content = %s 
+            WHERE id = %s
+        ''', (new_content, content_id))
+        conn.commit()
+        
+        # Показываем обновленную версию
+        updated_preview = f"""
+✏️ *ТЕКСТ ОБНОВЛЕН*
+
+{new_content}
+
+✅ Изменения сохранены. Теперь можете одобрить пост.
+        """
+        
+        # Создаем новую клавиатуру для обновленного поста
+        markup = telebot.types.InlineKeyboardMarkup()
+        markup.row(
+            telebot.types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{content_id}"),
+            telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
+            telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
+        )
+        
+        bot.send_message(
+            message.chat.id,
+            updated_preview,
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+        
+        logger.info(f"✏️ Контент {content_id} отредактирован")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка редактирования: {e}")
+        bot.reply_to(message, f"❌ Ошибка при сохранении: {e}")
 
 def main():
     """Запуск бота"""
@@ -959,11 +737,7 @@ def main():
         logger.error("❌ Не все переменные окружения установлены!")
         return
     
-    # Запускаем планировщик постов
-    scheduler_thread = threading.Thread(target=post_scheduler, daemon=True)
-    scheduler_thread.start()
-    
-    # Запускаем автопланировщик контента
+    # Запускаем все планировщики
     start_scheduler()
     
     # Запускаем бота
@@ -972,13 +746,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-
-
-
-
