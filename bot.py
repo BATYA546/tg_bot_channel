@@ -99,45 +99,45 @@ class DatabaseManager:
             return []
 
     @bot.message_handler(commands=['debug_posts'])
- def debug_posts_command(message):
-    """Отладочная информация о постах"""
-    if str(message.from_user.id) != ADMIN_ID:
-        bot.reply_to(message, "⛔ Нет прав!")
-        return
+    def debug_posts_command(message):
+        """Отладочная информация о постах"""
+        if str(message.from_user.id) != ADMIN_ID:
+            bot.reply_to(message, "⛔ Нет прав!")
+            return
 
-    try:
-        conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT id, message_text, scheduled_time, is_published, created_at
-            FROM scheduled_posts 
-            ORDER BY scheduled_time
-        ''')
-        all_posts = cursor.fetchall()
-        conn.close()
+        try:
+            conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, message_text, scheduled_time, is_published, created_at
+                FROM scheduled_posts 
+                ORDER BY scheduled_time
+            ''')
+            all_posts = cursor.fetchall()
+            conn.close()
         
-        now = datetime.now()
-        response = f"🐛 ОТЛАДКА ПОСТОВ (всего: {len(all_posts)})\n"
-        response += f"⏰ Текущее время: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            now = datetime.now()
+            response = f"🐛 ОТЛАДКА ПОСТОВ (всего: {len(all_posts)})\n"
+            response += f"⏰ Текущее время: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         
-        for post in all_posts:
-            post_id, text, post_time, is_published, created_at = post
-            time_str = post_time.strftime('%Y-%m-%d %H:%M:%S')
-            time_left = (post_time - now).total_seconds()
+            for post in all_posts:
+                post_id, text, post_time, is_published, created_at = post
+                time_str = post_time.strftime('%Y-%m-%d %H:%M:%S')
+                time_left = (post_time - now).total_seconds()
             
-            status = "✅ ОПУБЛИКОВАН" if is_published else f"⏳ Ожидает ({int(time_left)} сек)"
-            response += f"🆔 {post_id} | {status}\n"
-            response += f"📅 {time_str}\n"
-            response += f"📝 {text[:30]}...\n"
-            response += "─" * 40 + "\n"
+                status = "✅ ОПУБЛИКОВАН" if is_published else f"⏳ Ожидает ({int(time_left)} сек)"
+                response += f"🆔 {post_id} | {status}\n"
+                response += f"📅 {time_str}\n"
+                response += f"📝 {text[:30]}...\n"
+                response += "─" * 40 + "\n"
         
         # Принудительно запускаем проверку
-        publish_scheduled_posts()
+            publish_scheduled_posts()
         
-        bot.reply_to(message, response)
+            bot.reply_to(message, response)
         
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка отладки: {e}")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Ошибка отладки: {e}")
     
     def mark_as_published(self, post_id):
         """Отмечает пост как опубликованный"""
@@ -391,4 +391,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
