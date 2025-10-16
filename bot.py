@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import telebot
 from dotenv import load_dotenv
 import psycopg2
@@ -27,13 +27,16 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Исправляем функцию get_current_time
-def get_current_time():
-    """Возвращает текущее время с поправкой на часовой пояс"""
-    return datetime.utcnow() + timedelta(hours=TIMEZONE_OFFSET)
+# Исправление часового пояса (UTC+3 для Москвы)
+TIMEZONE_OFFSET = 3
 
-# Или лучше использовать timezone-aware datetime:
-from datetime import timezone
+# Импорт content_finder
+try:
+    from content_finder import setup_content_finder
+    CONTENT_FINDER_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"❌ ContentFinder не доступен: {e}")
+    CONTENT_FINDER_AVAILABLE = False
 
 def get_current_time():
     """Возвращает текущее время с правильным часовым поясом"""
@@ -188,40 +191,42 @@ db = DatabaseManager()
 editing_posts = {}
 
 def send_formatted_message(chat_id, text):
-    """Умная отправка сообщений с форматированием"""
+    """Простая отправка сообщений без форматирования"""
     try:
-        # Сначала пробуем отправить как есть (без форматирования)
-        bot.send_message(chat_id, text, parse_mode=None)
+        # Просто отправляем как обычный текст
+        bot.send_message(chat_id, text)
+        logger.info(f"✅ Сообщение отправлено в {chat_id}")
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка отправки сообщения: {e}")
-        try:
-            # Если не получается, разбиваем на части
-            if len(text) > 4000:
-                parts = []
-                lines = text.split('\n')
-                current_part = ""
-                
-                for line in lines:
-                    if len(current_part + line) < 4000:
-                        current_part += line + "\n"
-                    else:
-                        parts.append(current_part)
-                        current_part = line + "\n"
-                
-                if current_part:
-                    parts.append(current_part)
-                
-                for part in parts:
-                    bot.send_message(chat_id, part, parse_mode=None)
-                    time.sleep(0.5)
-            else:
-                bot.send_message(chat_id, text, parse_mode=None)
+        return False
+
+def publish_approved_post(content_id):
+    """Публикует одобренный пост в канал"""
+    try:
+        # Получаем контент из базы
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT content FROM found_content WHERE id = %s', (content_id,))
+        result = cursor.fetchone()
+        
+        if result:
+            full_post_text = result[0]
+            logger.info(f"📤 Публикую пост {content_id}: {full_post_text}")
             
-            return True
-        except Exception as e2:
-            logger.error(f"❌ Критическая ошибка отправки: {e2}")
-            return False
+            # Публикуем в канал
+            success = send_formatted_message(CHANNEL_ID, full_post_text)
+            
+            if success:
+                # Отмечаем как опубликованный
+                cursor.execute('UPDATE found_content SET is_published = TRUE WHERE id = %s', (content_id,))
+                conn.commit()
+                logger.info(f"✅ Пост {content_id} опубликован в канале")
+                return True
+            else:
+                logger.error(f"❌ Не удалось опубликовать пост {content_id}")
+        
+        return False
         
     except Exception as e:
         logger.error(f"❌ Ошибка публикации поста {content_id}: {e}")
@@ -275,7 +280,7 @@ def auto_content_scheduler():
             if CONTENT_FINDER_AVAILABLE:
                 logger.info("🔄 Автоматический поиск контента...")
                 finder = setup_content_finder()
-                found_content = finder.search_content(max_posts=1)  # 1 пост за раз
+                found_content = finder.search_content(max_posts=1)
                 
                 if found_content:
                     content = found_content[0]
@@ -292,10 +297,10 @@ def auto_content_scheduler():
         except Exception as e:
             logger.error(f"❌ Ошибка автоматического планировщика: {e}")
     
-    # Временное решение: запускать каждые 10 минут для теста
+    # Запускаем каждые 10 минут для теста
     while True:
-        job()  # Запускаем сразу
-        time.sleep(600)  # Ждем 10 минут
+        job()
+        time.sleep(600)
 
 def start_scheduler():
     """Запускает все планировщики"""
@@ -329,36 +334,43 @@ def start_command(message):
     if str(message.from_user.id) == ADMIN_ID:
         current_time = get_current_time()
         response = f"""
-🤖 <b>Бот управления каналом</b>
+🤖 Бот управления каналом
 
 ⏰ Время: {current_time.strftime('%H:%M %d.%m.%Y')}
 
-⚙️ <b>Команды:</b>
+⚙️ Команды:
 /post_now - опубликовать пост
 /schedule - запланировать пост  
 /list_posts - список постов
 /stats - статистика
 /find_content - найти контент
 /view_found - просмотреть найденные посты
+/time - проверить время
 
-📝 <b>Пример:</b>
-/schedule "<b>Важно</b> сообщение" 2024-01-15 15:30
+📝 Пример:
+/schedule "Важно сообщение" 2024-01-15 15:30
 """
-        bot.reply_to(message, response, parse_mode='HTML')
+        bot.reply_to(message, response)
     else:
         response = """
-👋 <b>Привет!</b>
+👋 Привет!
 
-Я бот канала <b>"Самое Первое"</b> 🏆
+Я бот канала "Самое Первое" 🏆
 
-📌 <b>Мы публикуем:</b>
+📌 Мы публикуем:
 • Первые открытия и изобретения
 • Мировые рекорды
 • Революционные технологии
 
-💡 <b>Будьте в курсе самого важного!</b>
+💡 Будьте в курсе самого важного!
 """
-        bot.reply_to(message, response, parse_mode='HTML')
+        bot.reply_to(message, response)
+
+@bot.message_handler(commands=['time'])
+def time_command(message):
+    """Показывает текущее время бота"""
+    current_time = get_current_time()
+    bot.reply_to(message, f"🕒 Текущее время бота: {current_time.strftime('%H:%M:%S %d.%m.%Y')}")
 
 @bot.message_handler(commands=['post_now'])
 def post_now_command(message):
@@ -430,7 +442,7 @@ def list_posts_command(message):
         bot.reply_to(message, "📭 Нет запланированных постов")
         return
 
-    response = "📅 *Запланированные посты:*\n\n"
+    response = "📅 Запланированные посты:\n\n"
     for post in posts:
         post_id, text, post_time = post
         time_str = post_time.strftime('%d.%m %H:%M')
@@ -442,7 +454,7 @@ def list_posts_command(message):
         response += f"📝 {text[:50]}...\n"
         response += "─" * 30 + "\n"
 
-    bot.reply_to(message, response, parse_mode='Markdown')
+    bot.reply_to(message, response)
 
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
@@ -466,19 +478,19 @@ def stats_command(message):
         auto_published_count = cursor.fetchone()[0]
         
         stats_text = f"""
-📊 *Статистика бота:*
+📊 Статистика бота:
 
-🗃️ *База данных:* ✅ PostgreSQL
-📊 *Публикации:*
+🗃️ База данных: ✅ PostgreSQL
+📊 Публикации:
 ✅ Опубликовано вручную: {published_count}
 🤖 Опубликовано авто: {auto_published_count}
 ⏳ В ожидании: {pending_count}
 
-⏰ *Время:* {current_time.strftime('%H:%M %d.%m.%Y')}
+⏰ Время: {current_time.strftime('%H:%M %d.%m.%Y')}
 
-*Бот работает исправно!* 🚀
+Бот работает исправно! 🚀
 """
-        bot.reply_to(message, stats_text, parse_mode='Markdown')
+        bot.reply_to(message, stats_text)
         
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка статистики: {e}")
@@ -504,7 +516,7 @@ def find_content_command(message):
             for content in found_content:
                 content_id = db.add_found_content(content)
                 
-                # Форматируем превью БЕЗ Markdown
+                # Форматируем превью
                 preview = finder.format_for_preview(content)
                 
                 # Создаем клавиатуру
@@ -515,11 +527,10 @@ def find_content_command(message):
                     telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
                 )
                 
-                # Отправляем сообщение с кнопками БЕЗ Markdown
+                # Отправляем сообщение с кнопками
                 bot.send_message(
                     message.chat.id, 
                     preview, 
-                    parse_mode=None,  # ВАЖНО: отключаем Markdown
                     reply_markup=markup
                 )
                 time.sleep(1)
@@ -554,7 +565,7 @@ def view_found_command(message):
             bot.reply_to(message, "📭 Нет найденных постов")
             return
         
-        response = "📋 *Последние найденные посты:*\n\n"
+        response = "📋 Последние найденные посты:\n\n"
         for post in posts:
             post_id, title, content, category, approved, published = post
             
@@ -566,7 +577,7 @@ def view_found_command(message):
             response += f"📝 {title[:50]}...\n"
             response += "─" * 30 + "\n"
         
-        bot.reply_to(message, response, parse_mode='Markdown')
+        bot.reply_to(message, response)
         
     except Exception as e:
         logger.error(f"❌ Ошибка просмотра постов: {e}")
@@ -593,16 +604,14 @@ def handle_callback(call):
                 success = publish_approved_post(content_id)
                 
                 if success:
-                    # Вместо полного текста показываем короткое подтверждение
-                    final_text = "✅ *ПОСТ УСПЕШНО ОПУБЛИКОВАН В КАНАЛЕ!* 📢"
+                    final_text = "✅ ПОСТ УСПЕШНО ОПУБЛИКОВАН В КАНАЛЕ! 📢"
                 else:
                     final_text = "❌ Ошибка публикации поста"
                 
                 bot.edit_message_text(
                     chat_id=call.message.chat.id,
                     message_id=call.message.message_id,
-                    text=final_text,
-                    parse_mode='Markdown'
+                    text=final_text
                 )
             
         elif call.data.startswith('reject_'):
@@ -612,8 +621,7 @@ def handle_callback(call):
             bot.edit_message_text(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                text="❌ *Контент отклонен*",
-                parse_mode='Markdown'
+                text="❌ Контент отклонен"
             )
             
         elif call.data.startswith('edit_'):
@@ -632,7 +640,7 @@ def handle_callback(call):
                 # Сохраняем в памяти для редактирования
                 editing_posts[call.message.chat.id] = content_id
                 
-                # Показываем полный текст для редактирования БЕЗ Markdown
+                # Показываем полный текст для редактирования
                 edit_message = f"""✏️ РЕДАКТИРОВАНИЕ ПОСТА #{content_id}
 
 Текущий текст:
@@ -643,14 +651,12 @@ def handle_callback(call):
                 bot.edit_message_text(
                     chat_id=call.message.chat.id,
                     message_id=call.message.message_id,
-                    text="✏️ Режим редактирования",
-                    parse_mode=None
+                    text="✏️ Режим редактирования"
                 )
                 
                 bot.send_message(
                     call.message.chat.id,
-                    edit_message,
-                    parse_mode=None
+                    edit_message
                 )
             
     except Exception as e:
@@ -678,13 +684,11 @@ def handle_edit_text(message):
         conn.commit()
         
         # Показываем обновленную версию
-        updated_preview = f"""
-✏️ *ТЕКСТ ОБНОВЛЕН*
+        updated_preview = f"""✏️ ТЕКСТ ОБНОВЛЕН
 
 {new_content}
 
-✅ Изменения сохранены. Теперь можете одобрить пост.
-        """
+✅ Изменения сохранены. Теперь можете одобрить пост."""
         
         # Создаем новую клавиатуру для обновленного поста
         markup = telebot.types.InlineKeyboardMarkup()
@@ -697,7 +701,6 @@ def handle_edit_text(message):
         bot.send_message(
             message.chat.id,
             updated_preview,
-            parse_mode='Markdown',
             reply_markup=markup
         )
         
@@ -724,6 +727,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
