@@ -303,9 +303,10 @@ def safe_polling():
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    """Команда start"""
+    """Команда start для админа"""
     if str(message.from_user.id) != ADMIN_ID:
-        bot.reply_to(message, "⛔ Нет прав!")
+        # Для не-админов показываем приветствие
+        start_private_command(message)
         return
     
     current_time = get_current_time()
@@ -313,17 +314,17 @@ def start_command(message):
     bot.reply_to(message,
         f"🤖 Бот для управления каналом запущен!\n"
         f"⏰ Текущее время: {current_time.strftime('%d.%m.%Y %H:%M')}\n\n"
-        "Команды:\n"
-        "/post_now текст - опубликовать сейчас\n"
-        "/schedule \"текст\" 2024-01-15 15:00 - запланировать\n"
+        "⚙️ *Команды админа:*\n"
+        "/post_now - опубликовать пост\n"  
+        "/schedule - запланировать пост\n"
         "/list_posts - список постов\n"
-        "/debug_posts - отладка\n"
-        "/formatting - справка по форматированию\n"
-        "/help - справка\n\n"
-        "Примеры:\n"
-        "/post_now Привет мир!\n"
+        "/setup_welcome - создать приветствие\n"
+        "/stats - статистика\n\n"
+        "👋 *Для участников:*\n"
+        "Отправьте /start в ЛС бота\n\n"
+        "📝 *Пример:*\n"
         '/schedule "**Важное** сообщение" 2024-01-15 15:30'
-    )
+    , parse_mode='Markdown')
 
 @bot.message_handler(commands=['post_now'])
 def post_now_command(message):
@@ -571,5 +572,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
