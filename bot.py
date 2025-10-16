@@ -516,8 +516,19 @@ def find_content_command(message):
         
         if found_content:
             for content in found_content:
+                # ОТЛАДОЧНАЯ ИНФОРМАЦИЯ
+                logger.info(f"📝 Контент перед сохранением: {content['summary'][:100]}...")
+                
                 # Сохраняем в базу
                 content_id = db.add_found_content(content)
+                
+                # Проверяем что сохранилось в базе
+                conn = db.get_connection()
+                cursor = conn.cursor()
+                cursor.execute('SELECT content FROM found_content WHERE id = %s', (content_id,))
+                saved_content = cursor.fetchone()
+                if saved_content:
+                    logger.info(f"💾 Контент после сохранения: {saved_content[0][:100]}...")
                 
                 # Форматируем превью
                 preview = finder.format_for_preview(content)
@@ -537,7 +548,7 @@ def find_content_command(message):
                     parse_mode='Markdown',
                     reply_markup=markup
                 )
-                time.sleep(1)  # Пауза между отправками
+                time.sleep(1)
             
             bot.reply_to(message, f"✅ Найдено {len(found_content)} материалов. Проверьте предложения выше!")
         else:
@@ -746,3 +757,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
