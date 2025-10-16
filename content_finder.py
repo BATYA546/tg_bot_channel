@@ -103,11 +103,9 @@ class ContentFinder:
                         article_data = {
                             'title': title,
                             'summary': self.generate_summary(title),
-                            'source': 'РИА Наука',
-                            'url': link or 'https://ria.ru/science/',
                             'category': self.categorize_content(title),
                             'found_date': datetime.now()
-                        }
+                                        }
                         articles.append(article_data)
                         
                 except Exception as e:
