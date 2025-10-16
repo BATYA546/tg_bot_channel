@@ -117,11 +117,14 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Error marking post: {e}")
 
-    def add_found_content(self, content_data):
+# В класс DatabaseManager добавляем:
+def add_found_content(self, content_data):
     """Сохраняет найденный контент в базу"""
     try:
         conn = self.get_connection()
         cursor = conn.cursor()
+        
+        # Создаем таблицу если не существует
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS found_content (
                 id SERIAL PRIMARY KEY,
@@ -146,9 +149,12 @@ class DatabaseManager:
               content_data['url']))
         
         conn.commit()
-        return cursor.fetchone()[0]
+        content_id = cursor.fetchone()[0]
+        logger.info(f"✅ Сохранен найденный контент ID: {content_id}")
+        return content_id
+        
     except Exception as e:
-        self.logger.error(f"❌ Error saving found content: {e}")
+        logger.error(f"❌ Error saving found content: {e}")
         raise
 
 # Добавляем команду для ручного поиска контента
@@ -430,6 +436,40 @@ def stats_command(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка статистики: {e}")
 
+# Добавляем после всех message_handler
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    """Обработчик нажатий на инлайн-кнопки"""
+    try:
+        if call.data.startswith('approve_'):
+            content_id = int(call.data.split('_')[1])
+            bot.answer_callback_query(call.id, "✅ Контент одобрен!")
+            bot.edit_message_text(
+                "✅ Контент одобрен и будет опубликован!",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            # TODO: Логика публикации
+            
+        elif call.data.startswith('reject_'):
+            content_id = int(call.data.split('_')[1])
+            bot.answer_callback_query(call.id, "❌ Контент отклонен")
+            bot.edit_message_text(
+                "❌ Контент отклонен",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            # TODO: Логика удаления/архивирования
+            
+        elif call.data.startswith('edit_'):
+            content_id = int(call.data.split('_')[1])
+            bot.answer_callback_query(call.id, "✏️ Режим редактирования")
+            # TODO: Логика редактирования
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки callback: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка обработки")
+
 def main():
     """Запуск бота"""
     logger.info("🚀 Запуск бота...")
@@ -448,5 +488,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
