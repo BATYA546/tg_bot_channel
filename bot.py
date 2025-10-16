@@ -11,6 +11,22 @@ from bs4 import BeautifulSoup
 import telebot
 from dotenv import load_dotenv
 
+# Исправление часового пояса (UTC+3 для Москвы)
+TIMEZONE_OFFSET = 3  # Часов для Московского времени
+
+def get_current_time():
+    """Возвращает текущее время с поправкой на часовой пояс"""
+    return datetime.utcnow() + timedelta(hours=TIMEZONE_OFFSET)
+
+def parse_schedule_time(date_str, time_str):
+    """Парсит время планирования с учетом часового пояса"""
+    naive_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    return naive_time
+
+def format_time(dt):
+    """Форматирует время для отображения"""
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
+
 # Загрузка переменных окружения
 load_dotenv()
 
@@ -85,59 +101,11 @@ class DatabaseManager:
             ''')
             posts = cursor.fetchall()
             conn.close()
-        
-            # ВОТ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: не фильтруем по времени здесь
-            # Фильтрацию делаем в publish_scheduled_posts
             return posts
-        
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения постов: {e}")
-            return []
-        
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения постов: {e}")
-            return []
-
-    @bot.message_handler(commands=['debug_posts'])
-    def debug_posts_command(message):
-        """Отладочная информация о постах"""
-        if str(message.from_user.id) != ADMIN_ID:
-            bot.reply_to(message, "⛔ Нет прав!")
-            return
-
-        try:
-            conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT id, message_text, scheduled_time, is_published, created_at
-                FROM scheduled_posts 
-                ORDER BY scheduled_time
-            ''')
-            all_posts = cursor.fetchall()
-            conn.close()
-        
-            now = datetime.now()
-            response = f"🐛 ОТЛАДКА ПОСТОВ (всего: {len(all_posts)})\n"
-            response += f"⏰ Текущее время: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        
-            for post in all_posts:
-                post_id, text, post_time, is_published, created_at = post
-                time_str = post_time.strftime('%Y-%m-%d %H:%M:%S')
-                time_left = (post_time - now).total_seconds()
             
-                status = "✅ ОПУБЛИКОВАН" if is_published else f"⏳ Ожидает ({int(time_left)} сек)"
-                response += f"🆔 {post_id} | {status}\n"
-                response += f"📅 {time_str}\n"
-                response += f"📝 {text[:30]}...\n"
-                response += "─" * 40 + "\n"
-        
-        # Принудительно запускаем проверку
-            publish_scheduled_posts()
-        
-            bot.reply_to(message, response)
-        
         except Exception as e:
-            bot.reply_to(message, f"❌ Ошибка отладки: {e}")
+            logger.error(f"❌ Ошибка получения постов: {e}")
+            return []
     
     def mark_as_published(self, post_id):
         """Отмечает пост как опубликованный"""
@@ -158,16 +126,17 @@ def publish_scheduled_posts():
     """Публикует запланированные посты"""
     try:
         posts = db.get_pending_posts()
-        now = datetime.now()
+        now = get_current_time()
         
         logger.info(f"🔍 Проверка постов... Найдено: {len(posts)}")
+        logger.info(f"⏰ Текущее время сервера: {format_time(now)}")
         
         published_count = 0
         for post in posts:
             post_id, message_text, scheduled_time = post
             
             time_left = (scheduled_time - now).total_seconds()
-            logger.info(f"📋 Пост {post_id}: запланирован на {scheduled_time}, осталось {time_left:.0f} сек")
+            logger.info(f"📋 Пост {post_id}: запланирован на {format_time(scheduled_time)}, осталось {time_left:.0f} сек")
             
             # Публикуем если время наступило ИЛИ прошло
             if time_left <= 0:
@@ -212,12 +181,16 @@ def start_command(message):
         bot.reply_to(message, "⛔ Нет прав!")
         return
     
+    current_time = get_current_time()
+    
     bot.reply_to(message,
-        "🤖 Бот для управления каналом запущен!\n\n"
+        f"🤖 Бот для управления каналом запущен!\n"
+        f"⏰ Текущее время: {current_time.strftime('%d.%m.%Y %H:%M')}\n\n"
         "Команды:\n"
         "/post_now текст - опубликовать сейчас\n"
         "/schedule \"текст\" 2024-01-15 15:00 - запланировать\n"
         "/list_posts - список постов\n"
+        "/debug_posts - отладка\n"
         "/help - справка\n\n"
         "Примеры:\n"
         "/post_now Привет мир!\n"
@@ -296,11 +269,11 @@ def schedule_command(message):
         date_str = datetime_parts[0]
         time_str = datetime_parts[1]
 
-        scheduled_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-        now = datetime.now()
+        scheduled_time = parse_schedule_time(date_str, time_str)
+        now = get_current_time()
         
         time_diff = (scheduled_time - now).total_seconds()
-        logger.info(f"⏰ Запланировано на: {scheduled_time}, через {time_diff:.0f} сек")
+        logger.info(f"⏰ Запланировано на: {format_time(scheduled_time)}, через {time_diff:.0f} сек")
         
         if time_diff <= 0:
             bot.reply_to(message, "❌ Укажите будущее время!")
@@ -313,9 +286,10 @@ def schedule_command(message):
             f"🆔 ID: {post_id}\n"
             f"📅 Когда: {scheduled_time.strftime('%d.%m.%Y в %H:%M')}\n"
             f"📝 Текст: {message_text[:80]}...\n\n"
+            f"⏰ Текущее время: {now.strftime('%H:%M')}\n"
             f"Используйте /debug_posts для отладки"
         )
-        logger.info(f"📅 Запланирован пост ID: {post_id} на {scheduled_time}")
+        logger.info(f"📅 Запланирован пост ID: {post_id} на {format_time(scheduled_time)}")
         
     except ValueError as e:
         error_msg = f"❌ Неверный формат даты или времени!\nИспользуйте: ГГГГ-ММ-ДД ЧЧ:ММ\nПример: 2024-01-15 15:30"
@@ -333,16 +307,17 @@ def list_posts_command(message):
         return
 
     posts = db.get_pending_posts()
+    now = get_current_time()
     
     if not posts:
         bot.reply_to(message, "📭 Нет запланированных постов")
         return
 
-    response = "📅 Запланированные посты:\n\n"
+    response = f"📅 Запланированные посты (время: {now.strftime('%H:%M')}):\n\n"
     for post in posts:
         post_id, text, post_time = post
         time_str = post_time.strftime('%d.%m.%Y %H:%M')
-        time_left = (post_time - datetime.now()).total_seconds()
+        time_left = (post_time - now).total_seconds()
         
         status = "✅ ГОТОВ" if time_left <= 0 else f"⏳ {int(time_left/60)} мин"
         response += f"🆔 {post_id} | {status}\n"
@@ -352,15 +327,59 @@ def list_posts_command(message):
 
     bot.reply_to(message, response)
 
+@bot.message_handler(commands=['debug_posts'])
+def debug_posts_command(message):
+    """Отладочная информация о постах"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+
+    try:
+        conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, message_text, scheduled_time, is_published, created_at
+            FROM scheduled_posts 
+            ORDER BY scheduled_time
+        ''')
+        all_posts = cursor.fetchall()
+        conn.close()
+        
+        now = get_current_time()
+        response = f"🐛 ОТЛАДКА ПОСТОВ (всего: {len(all_posts)})\n"
+        response += f"⏰ Текущее время: {format_time(now)}\n\n"
+        
+        for post in all_posts:
+            post_id, text, post_time, is_published, created_at = post
+            time_str = format_time(post_time)
+            time_left = (post_time - now).total_seconds()
+            
+            status = "✅ ОПУБЛИКОВАН" if is_published else f"⏳ Ожидает ({int(time_left)} сек)"
+            response += f"🆔 {post_id} | {status}\n"
+            response += f"📅 {time_str}\n"
+            response += f"📝 {text[:30]}...\n"
+            response += "─" * 40 + "\n"
+        
+        # Принудительно запускаем проверку
+        publish_scheduled_posts()
+        
+        bot.reply_to(message, response)
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка отладки: {e}")
+
 @bot.message_handler(commands=['help'])
 def help_command(message):
     """Команда помощи"""
+    current_time = get_current_time()
+    
     bot.reply_to(message,
-        "📖 Доступные команды:\n\n"
+        f"📖 Доступные команды (время: {current_time.strftime('%H:%M')}):\n\n"
         "/start - начать работу\n"
         "/post_now [текст] - опубликовать пост сейчас\n"
         "/schedule [текст] [дата] [время] - запланировать пост\n"
         "/list_posts - показать запланированные посты\n"
+        "/debug_posts - отладка постов\n"
         "/help - эта справка\n\n"
         "📅 Формат даты: ГГГГ-ММ-ДД ЧЧ:ММ\n"
         "Пример: /schedule \"Важное сообщение\" 2024-01-15 17:00"
@@ -391,5 +410,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
