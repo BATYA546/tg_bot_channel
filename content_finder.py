@@ -5,7 +5,6 @@ from datetime import datetime
 import time
 from bs4 import BeautifulSoup
 import random
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,7 @@ class ContentFinder:
             "прогресс", "разработк", "создан", "запуск", "обнаружен"
         ]
         
-        # Добавляем больше источников
+        # Исправляем источники - убираем параметр url из вызовов
         self.sources = [
             {
                 'name': 'РИА Новости (наука)',
@@ -31,7 +30,7 @@ class ContentFinder:
                 'parser': self.parse_ria_science
             },
             {
-                'name': 'ТАСС (наука)',
+                'name': 'ТАСС (наука)', 
                 'url': 'https://tass.ru/nauka',
                 'parser': self.parse_tass_science
             },
@@ -51,6 +50,7 @@ class ContentFinder:
         for source in self.sources:
             try:
                 logger.info(f"📰 Проверяю {source['name']}...")
+                # Передаем URL в парсер
                 content = source['parser'](source['url'])
                 if content:
                     found_content.extend(content)
@@ -60,174 +60,235 @@ class ContentFinder:
                     found_content = found_content[:max_posts]
                     break
                     
-                time.sleep(3)  # Увеличиваем паузу
+                time.sleep(3)
                 
             except Exception as e:
                 logger.error(f"❌ Ошибка парсинга {source['name']}: {e}")
                 continue
         
-        # Если ничего не нашли, используем fallback - создаем тестовый контент
+        # Если ничего не нашли, используем fallback
         if not found_content:
             found_content = self.generate_fallback_content()
         
         logger.info(f"🎯 Всего найдено материалов: {len(found_content)}")
         return found_content
 
-def parse_ria_science(self, url):
-    """Парсер РИА Новости (наука)"""
-    try:
-        response = self.session.get(url, timeout=15)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        articles = []
-        news_items = soup.find_all('div', class_=['list-item', 'cell'])
-        
-        for item in news_items[:15]:
-            try:
-                title_elem = item.find(['a', 'h2', 'span'])
-                if not title_elem:
+    def parse_ria_science(self, url):
+        """Парсер РИА Новости (наука)"""
+        try:
+            response = self.session.get(url, timeout=15)
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            articles = []
+            # Ищем различные элементы с новостями
+            news_items = soup.find_all(['div', 'article'], class_=True)
+            
+            for item in news_items[:20]:
+                try:
+                    # Ищем заголовок в разных тегах
+                    title_elem = (item.find('h2') or 
+                                 item.find('h3') or 
+                                 item.find('h4') or
+                                 item.find('a') or
+                                 item.find('span'))
+                    
+                    if not title_elem:
+                        continue
+                        
+                    title = title_elem.get_text().strip()
+                    if len(title) < 15:  # Минимальная длина
+                        continue
+                    
+                    # Более мягкая проверка релевантности
+                    if self.is_relevant_content(title):
+                        article_data = {
+                            'title': title,
+                            'summary': self.generate_summary(title),
+                            'category': self.categorize_content(title),
+                            'url': '',
+                            'found_date': datetime.now()
+                        }
+                        articles.append(article_data)
+                        
+                except Exception as e:
                     continue
                     
-                title = title_elem.get_text().strip()
-                if len(title) < 10:
-                    continue
-                
-                if self.is_relevant_content(title):
-                    article_data = {
-                        'title': title,
-                        'summary': self.generate_summary(title),
-                        'category': self.categorize_content(title),
-                        'url': '',  # Убрали source, оставили url пустым
-                        'found_date': datetime.now()
-                    }
-                    articles.append(article_data)
-                    
-            except Exception as e:
-                logger.debug(f"Ошибка обработки статьи РИА: {e}")
-                continue
-                
-        return articles[:3]
-        
-    except Exception as e:
-        logger.error(f"Ошибка парсинга РИА: {e}")
-        return []
+            return articles[:3]
+            
+        except Exception as e:
+            logger.error(f"Ошибка парсинга РИА: {e}")
+            return []
 
-def parse_tass_science(self, url):
-    """Парсер ТАСС (наука)"""
-    try:
-        response = self.session.get(url, timeout=15)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        articles = []
-        news_items = soup.find_all(['article', 'div'], class_=True)
-        
-        for item in news_items[:20]:
-            try:
-                title_elem = (item.find('h2') or 
-                             item.find('h3') or 
-                             item.find('a') or 
-                             item.find('span'))
-                
-                if not title_elem:
+    def parse_tass_science(self, url):
+        """Парсер ТАСС (наука)"""
+        try:
+            response = self.session.get(url, timeout=15)
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            articles = []
+            # Ищем заголовки новостей ТАСС
+            news_items = soup.find_all(['article', 'div', 'li'], class_=True)
+            
+            for item in news_items[:25]:
+                try:
+                    # Ищем заголовки в различных тегах
+                    title_elem = (item.find('h2') or 
+                                 item.find('h3') or 
+                                 item.find('h4') or
+                                 item.find('a') or 
+                                 item.find('span'))
+                    
+                    if not title_elem:
+                        continue
+                        
+                    title = title_elem.get_text().strip()
+                    if len(title) < 10:
+                        continue
+                    
+                    if self.is_relevant_content(title):
+                        article_data = {
+                            'title': title,
+                            'summary': self.generate_summary(title),
+                            'category': self.categorize_content(title),
+                            'url': '',
+                            'found_date': datetime.now()
+                        }
+                        articles.append(article_data)
+                        
+                except Exception as e:
                     continue
                     
-                title = title_elem.get_text().strip()
-                if len(title) < 15:
+            return articles[:2]
+            
+        except Exception as e:
+            logger.error(f"Ошибка парсинга ТАСС: {e}")
+            return []
+
+    def parse_nplus1_archive(self, url):
+        """Парсер архива N+1"""
+        try:
+            response = self.session.get(url, timeout=15)
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            articles = []
+            # Более широкий поиск элементов
+            news_items = soup.find_all(['article', 'div', 'section'], class_=True)
+            
+            for item in news_items[:15]:
+                try:
+                    title_elem = (item.find('h2') or 
+                                 item.find('h3') or
+                                 item.find('h1') or
+                                 item.find('a'))
+                    if not title_elem:
+                        continue
+                        
+                    title = title_elem.get_text().strip()
+                    if len(title) < 10:
+                        continue
+                    
+                    if self.is_relevant_content(title):
+                        article_data = {
+                            'title': title,
+                            'summary': self.generate_summary(title),
+                            'category': self.categorize_content(title),
+                            'url': '',
+                            'found_date': datetime.now()
+                        }
+                        articles.append(article_data)
+                        
+                except Exception:
                     continue
-                
-                if self.is_relevant_content(title):
-                    article_data = {
-                        'title': title,
-                        'summary': self.generate_summary(title),
-                        'category': self.categorize_content(title),
-                        'url': '',
-                        'found_date': datetime.now()
-                    }
-                    articles.append(article_data)
                     
-            except Exception as e:
-                continue
-                
-        return articles[:2]
-        
-    except Exception as e:
-        logger.error(f"Ошибка парсинга ТАСС: {e}")
-        return []
+            return articles[:2]
+            
+        except Exception as e:
+            logger.error(f"Ошибка парсинга N+1: {e}")
+            return []
 
-def parse_nplus1_archive(self, url):
-    """Парсер архива N+1"""
-    try:
-        response = self.session.get(url, timeout=15)
-        soup = BeautifulSoup(response.content, 'html.parser')
+    def is_relevant_content(self, text):
+        """Более мягкая проверка релевантности"""
+        text_lower = text.lower()
         
-        articles = []
-        news_items = soup.find_all('article')[:10]
-        
-        for item in news_items:
-            try:
-                title_elem = item.find('h2') or item.find('a')
-                if not title_elem:
-                    continue
-                    
-                title = title_elem.get_text().strip()
+        # Проверяем по ключевым словам (частичное совпадение)
+        for keyword in self.keywords:
+            if keyword in text_lower:
+                return True
                 
-                if self.is_relevant_content(title):
-                    article_data = {
-                        'title': title,
-                        'summary': self.generate_summary(title),
-                        'category': self.categorize_content(title),
-                        'url': '',
-                        'found_date': datetime.now()
-                    }
-                    articles.append(article_data)
-                    
-            except Exception:
-                continue
+        # Дополнительные проверки для научного контента
+        science_words = ['учен', 'исследова', 'разработ', 'созда', 'обнаруж']
+        for word in science_words:
+            if word in text_lower:
+                return True
                 
-        return articles[:2]
+        return False
+
+    def generate_summary(self, title):
+        """Генерирует краткое описание на основе заголовка"""
+        summaries = [
+            f"Интересное открытие в области науки и технологий: {title}",
+            f"Новое достижение исследователей: {title}",
+            f"Прогресс в развитии технологий: {title}",
+            f"Важное научное событие: {title}",
+            f"Инновационная разработка: {title}",
+            f"Революционное открытие: {title}",
+            f"Историческое достижение: {title}",
+            f"Уникальная технология: {title}"
+        ]
+        return random.choice(summaries)
+
+    def categorize_content(self, title):
+        """Категоризирует контент"""
+        title_lower = title.lower()
         
-    except Exception as e:
-        logger.error(f"Ошибка парсинга N+1: {e}")
-        return []
+        if any(word in title_lower for word in ['технолог', 'инновац', 'изобрет', 'разработ', 'компьютер', 'ии']):
+            return 'technology'
+        elif any(word in title_lower for word in ['наук', 'открыт', 'исследова', 'учен', 'физик', 'хими']):
+            return 'science'
+        elif any(word in title_lower for word in ['рекорд', 'первый', 'истори', 'уникальн', 'впервые']):
+            return 'records'
+        else:
+            return 'discovery'
 
-def generate_fallback_content(self):
-    """Генерирует тестовый контент если ничего не найдено"""
-    logger.info("🔄 Генерирую тестовый контент...")
-    
-    fallback_titles = [
-        "Ученые создали первый в мире квантовый компьютер с рекордной производительностью",
-        "Революционная технология позволила впервые получить энергию из вакуума",
-        "Историческое открытие: обнаружена новая частица, меняющая представления о физике",
-        "Первый в мире искусственный интеллект прошел тест Тьюринга с рекордным результатом",
-        "Инновационная разработка: созданы солнечные батареи с КПД более 50%"
-    ]
-    
-    content_list = []
-    for title in random.sample(fallback_titles, 3):
-        content_list.append({
-            'title': title,
-            'summary': self.generate_summary(title),
-            'category': self.categorize_content(title),
-            'url': '',
-            'found_date': datetime.now()
-        })
-    
-    return content_list
+    def generate_fallback_content(self):
+        """Генерирует тестовый контент если ничего не найдено"""
+        logger.info("🔄 Генерирую тестовый контент...")
+        
+        fallback_titles = [
+            "Ученые создали первый в мире квантовый компьютер с рекордной производительностью",
+            "Революционная технология позволила впервые получить энергию из вакуума",
+            "Историческое открытие: обнаружена новая частица, меняющая представления о физике",
+            "Первый в мире искусственный интеллект прошел тест Тьюринга с рекордным результатом",
+            "Инновационная разработка: созданы солнечные батареи с КПД более 50%",
+            "Ученые впервые создали искусственный мозг с возможностью самообучения",
+            "Рекордный прорыв: разработана технология телепортация информации на расстояние 100 км",
+            "Впервые в истории: обнаружена планета с условиями, идентичными Земле"
+        ]
+        
+        content_list = []
+        for title in random.sample(fallback_titles, 3):
+            content_list.append({
+                'title': title,
+                'summary': self.generate_summary(title),
+                'category': self.categorize_content(title),
+                'url': '',
+                'found_date': datetime.now()
+            })
+        
+        return content_list
 
-# В методе format_for_preview меняем:
-def format_for_preview(self, content):
-    """Форматирует контент для предпросмотра"""
-    # Создаем эмодзи для категорий
-    category_emojis = {
-        'technology': '🔧',
-        'science': '🔬', 
-        'records': '🏆',
-        'discovery': '💡'
-    }
-    
-    emoji = category_emojis.get(content['category'], '📰')
-    
-    return f"""
+    def format_for_preview(self, content):
+        """Форматирует контент для предпросмотра"""
+        category_emojis = {
+            'technology': '🔧',
+            'science': '🔬', 
+            'records': '🏆',
+            'discovery': '💡'
+        }
+        
+        emoji = category_emojis.get(content['category'], '📰')
+        
+        return f"""
 {emoji} *Новый материал для публикации*
 
 *Заголовок:* {content['title']}
