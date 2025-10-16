@@ -144,32 +144,31 @@ class DatabaseManager:
             logger.error(f"❌ Error marking post: {e}")
 
     # НОВЫЙ МЕТОД - добавляем его
-    def add_found_content(self, content_data):
-        """Сохраняет найденный контент в базу"""
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT INTO found_content (title, content, category, source, url)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id
-            ''', (
-                content_data['title'], 
-                content_data['summary'], 
-                content_data['category'], 
-                content_data['source'], 
-                content_data['url']
-            ))
-            
-            conn.commit()
-            content_id = cursor.fetchone()[0]
-            logger.info(f"✅ Сохранен найденный контент ID: {content_id}")
-            return content_id
-            
-        except Exception as e:
-            logger.error(f"❌ Error saving found content: {e}")
-            raise
+def add_found_content(self, content_data):
+    """Сохраняет найденный контент в базу"""
+    try:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO found_content (title, content, category, url)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+        ''', (
+            content_data['title'], 
+            content_data['summary'], 
+            content_data['category'], 
+            content_data.get('url', '')  # url теперь необязательный
+        ))
+        
+        conn.commit()
+        content_id = cursor.fetchone()[0]
+        logger.info(f"✅ Сохранен найденный контент ID: {content_id}")
+        return content_id
+        
+    except Exception as e:
+        logger.error(f"❌ Error saving found content: {e}")
+        raise
 
 # Инициализация БД
 db = DatabaseManager()
@@ -788,6 +787,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
