@@ -21,220 +21,15 @@ class ContentFinder:
         
         found_content = []
         
-        # Пробуем разные источники
-        sources = [
-            self.parse_historical_events,
-            self.parse_science_news,
-            self.generate_quality_content
-        ]
+        # Используем качественный контент с правильными изображениями
+        quality_content = self.generate_quality_content_with_images()
+        found_content.extend(quality_content)
         
-        for source in sources:
-            try:
-                content = source()
-                if content:
-                    found_content.extend(content)
-                    logger.info(f"✅ Найдено: {len(content)} записей")
-                
-                if len(found_content) >= max_posts:
-                    break
-                    
-            except Exception as e:
-                logger.error(f"❌ Ошибка источника: {e}")
-                continue
-        
+        logger.info(f"🎯 Сгенерировано материалов: {len(found_content)}")
         return found_content[:max_posts]
 
-    def parse_historical_events(self):
-        """Парсинг исторических событий"""
-        try:
-            # Используем Wikipedia API для поиска исторических событий
-            url = "https://ru.wikipedia.org/w/api.php"
-            params = {
-                'action': 'query',
-                'list': 'search',
-                'srsearch': 'первое изобретение открытие изобретатель',
-                'format': 'json',
-                'srlimit': 5
-            }
-            
-            response = self.session.get(url, params=params, timeout=10)
-            data = response.json()
-            
-            articles = []
-            for item in data.get('query', {}).get('search', [])[:3]:
-                title = item.get('title', '')
-                snippet = item.get('snippet', '')
-                
-                # Очищаем HTML теги из сниппета
-                snippet = re.sub(r'<[^>]+>', '', snippet)
-                
-                if self.is_relevant_content(title + snippet):
-                    full_content = self.get_wikipedia_content(title)
-                    if full_content:
-                        image_url = self.get_wikipedia_image(title)
-                        post_text = self.format_wiki_post(title, full_content)
-                        
-                        articles.append({
-                            'title': title,
-                            'summary': post_text,
-                            'category': 'history',
-                            'url': f"https://ru.wikipedia.org/wiki/{title.replace(' ', '_')}",
-                            'image_url': image_url,
-                            'found_date': datetime.now()
-                        })
-            
-            return articles
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка парсинга Wikipedia: {e}")
-            return []
-
-    def get_wikipedia_content(self, title):
-        """Получает полный контент статьи"""
-        try:
-            url = "https://ru.wikipedia.org/w/api.php"
-            params = {
-                'action': 'query',
-                'prop': 'extracts',
-                'titles': title,
-                'explaintext': True,
-                'format': 'json'
-            }
-            
-            response = self.session.get(url, params=params, timeout=10)
-            data = response.json()
-            
-            pages = data.get('query', {}).get('pages', {})
-            for page_id, page_data in pages.items():
-                extract = page_data.get('extract', '')
-                # Берем первые 500 символов как основное содержание
-                if extract:
-                    sentences = extract.split('.')
-                    main_content = '.'.join(sentences[:3]) + '.'  # Первые 3 предложения
-                    return main_content.strip()
-            
-            return ""
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения контента: {e}")
-            return ""
-
-    def get_wikipedia_image(self, title):
-        """Получает изображение из статьи"""
-        try:
-            url = "https://ru.wikipedia.org/w/api.php"
-            params = {
-                'action': 'query',
-                'prop': 'pageimages',
-                'titles': title,
-                'pithumbsize': 500,
-                'format': 'json'
-            }
-            
-            response = self.session.get(url, params=params, timeout=10)
-            data = response.json()
-            
-            pages = data.get('query', {}).get('pages', {})
-            for page_id, page_data in pages.items():
-                thumbnail = page_data.get('thumbnail')
-                if thumbnail:
-                    return thumbnail.get('source', '')
-            
-            return ""
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения изображения: {e}")
-            return ""
-
-    def format_wiki_post(self, title, content):
-        """Форматирует пост из Wikipedia"""
-        # Создаем качественный пост в стиле вашей группы ВК
-        template = random.choice([
-            "🏆 ИСТОРИЧЕСКОЕ СОБЫТИЕ: {title}\n\n{content}\n\n📚 Это открытие положило начало новой эре в своей области и изменило представления человечества о возможном.\n\n#история #открытие #первый",
-            
-            "💡 НАУЧНЫЙ ПРОРЫВ: {title}\n\n{content}\n\n🔬 Революционное открытие, которое перевернуло привычные представления и открыло новые горизонты для исследований.\n\n#наука #прорыв #изобретение",
-            
-            "🚀 ТЕХНОЛОГИЧЕСКАЯ РЕВОЛЮЦИЯ: {title}\n\n{content}\n\n⚡ Инновация, которая кардинально изменила образ жизни людей и стала неотъемлемой частью современного мира.\n\n#технологии #революция #инновации"
-        ])
-        
-        return template.format(title=title.upper(), content=content)
-
-    def parse_science_news(self):
-        """Парсинг научных новостей"""
-        try:
-            # Парсим научные новости
-            url = "https://naked-science.ru"
-            response = self.session.get(url, timeout=10)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            articles = []
-            news_items = soup.find_all('article', class_='news')[:3]
-            
-            for item in news_items:
-                try:
-                    title_elem = item.find('h2') or item.find('a')
-                    if not title_elem:
-                        continue
-                        
-                    title = title_elem.get_text().strip()
-                    if self.is_relevant_content(title):
-                        # Получаем полный текст статьи
-                        link = title_elem.get('href', '')
-                        if link and not link.startswith('http'):
-                            link = url + link
-                        
-                        full_content = self.get_article_content(link) if link else title
-                        post_text = self.format_news_post(title, full_content)
-                        
-                        articles.append({
-                            'title': title,
-                            'summary': post_text,
-                            'category': 'science',
-                            'url': link,
-                            'image_url': '',
-                            'found_date': datetime.now()
-                        })
-                        
-                except Exception as e:
-                    continue
-                    
-            return articles
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка парсинга новостей: {e}")
-            return []
-
-    def get_article_content(self, url):
-        """Получает контент статьи"""
-        try:
-            response = self.session.get(url, timeout=10)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Ищем основной контент
-            content_div = soup.find('div', class_='content') or soup.find('article')
-            if content_div:
-                paragraphs = content_div.find_all('p')[:2]  # Берем первые 2 абзаца
-                content = ' '.join([p.get_text().strip() for p in paragraphs])
-                return content[:300] + '...'  # Ограничиваем длину
-            
-            return ""
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения контента статьи: {e}")
-            return ""
-
-    def format_news_post(self, title, content):
-        """Форматирует новостной пост"""
-        template = random.choice([
-            "🔬 НАУЧНОЕ ОТКРЫТИЕ\n\n{title}\n\n{content}\n\n💫 Это исследование открывает новые возможности для развития технологий и понимания окружающего мира.\n\n#наука #открытие #исследование",
-            
-            "🌍 ПЕРВЫЙ ШАГ: {title}\n\n{content}\n\n🎯 Историческое достижение, которое стало отправной точкой для дальнейших открытий в этой области.\n\n#первый #достижение #прогресс"
-        ])
-        
-        return template.format(title=title, content=content)
-
-    def generate_quality_content(self):
-        """Генерирует качественный контент когда парсинг не работает"""
+    def generate_quality_content_with_images(self):
+        """Генерирует качественный контент с работающими изображениями"""
         quality_posts = [
             {
                 'title': 'Первый искусственный спутник Земли',
@@ -259,10 +54,34 @@ class ContentFinder:
                 'url': '',
                 'image_url': 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/First_flight2.jpg/500px-First_flight2.jpg',
                 'found_date': datetime.now()
+            },
+            {
+                'title': 'Первая фотография',
+                'summary': "📷 ПЕРВАЯ В МИРЕ ФОТОГРАФИЯ\n\nВ 1826 году Жозеф Нисефор Ньепс сделал первую в истории фотографию под названием «Вид из окна в Ле Гра». Снимок создавался в течение 8 часов.\n\n• Год: 1826\n• Изобретатель: Жозеф Нисефор Ньепс\n• Техника: гелиография\n• Время экспозиции: 8 часов\n\n🎞️ Эта фотография положила начало развитию фотографии как искусства и технологии. Сегодня мы делаем миллиарды снимков ежедневно, но все началось с этого единственного изображения.\n\n#фотография #первая #история #изобретение",
+                'category': 'photography',
+                'url': '',
+                'image_url': 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/View_from_the_Window_at_Le_Gras%2C_Joseph_Nic%C3%A9phore_Ni%C3%A9pce.jpg/500px-View_from_the_Window_at_Le_Gras%2C_Joseph_Nic%C3%A9phore_Ni%C3%A9pce.jpg',
+                'found_date': datetime.now()
+            },
+            {
+                'title': 'Первый компьютер',
+                'summary': "💻 ПЕРВЫЙ ЭЛЕКТРОННЫЙ КОМПЬЮТЕР\n\nENIAC (Electronic Numerical Integrator and Computer), созданный в 1946 году, считается первым электронным компьютером общего назначения.\n\n• Год создания: 1946\n• Вес: 27 тонн\n• Площадь: 167 м²\n• Процессоров: 17 468 ламп\n\n⚡ ENIAC мог выполнять 5000 операций сложения в секунду. Его создание положило начало компьютерной революции и стало основой для всех современных вычислительных систем.\n\n#компьютер #технологии #история #ENIAC",
+                'category': 'computers',
+                'url': '',
+                'image_url': 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6c/ENIAC_Penn1.jpg/500px-ENIAC_Penn1.jpg',
+                'found_date': datetime.now()
+            },
+            {
+                'title': 'Первая вакцина',
+                'summary': "💉 ПЕРВАЯ ВАКЦИНА В ИСТОРИИ\n\nВ 1796 году Эдвард Дженнер создал первую в мире вакцину — против оспы. Он заметил, что доярки, переболевшие коровьей оспой, не заболевали натуральной оспой.\n\n• Год: 1796\n• Ученый: Эдвард Дженнер\n• Болезнь: оспа\n• Метод: коровья оспа\n\n🩺 Это открытие спасло миллионы жизней и положило начало иммунологии. Сегодня вакцинация предотвращает 2-3 миллиона смертей ежегодно.\n\n#медицина #вакцина #здоровье #история",
+                'category': 'medicine',
+                'url': '',
+                'image_url': 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c0/Edward_Jenner._Oil_painting._Wellcome_L0005043.jpg/500px-Edward_Jenner._Oil_painting._Wellcome_L0005043.jpg',
+                'found_date': datetime.now()
             }
         ]
         
-        return random.sample(quality_posts, 2)
+        return random.sample(quality_posts, 3)
 
     def is_relevant_content(self, text):
         """Проверяет релевантность контента"""
@@ -276,7 +95,15 @@ class ContentFinder:
 
     def format_for_preview(self, content):
         """Форматирует контент для предпросмотра"""
-        return f"📰 ПРЕДПРОСМОТР ПОСТА\n\n{content['summary']}\n\n⏰ Найдено: {content['found_date'].strftime('%H:%M %d.%m.%Y')}"
+        current_time = datetime.now()
+        preview_text = f"📰 ПРЕДПРОСМОТР ПОСТА\n\n{content['summary']}\n\n"
+        
+        if content.get('image_url'):
+            preview_text += f"🖼️ Есть изображение: {content['image_url'][:50]}...\n\n"
+        
+        preview_text += f"⏰ Найдено: {current_time.strftime('%H:%M %d.%m.%Y')}"
+        
+        return preview_text
 
 def setup_content_finder():
     """Инициализация системы поиска контента"""
