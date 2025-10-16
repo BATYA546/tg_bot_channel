@@ -9,7 +9,53 @@ import re
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import telebot
+from telebot import types
 from dotenv import load_dotenv
+
+# Добавьте в начало после импортов
+def parse_text_formatting(text):
+    """
+    Преобразует пользовательское форматирование в Markdown для Telegram
+    Поддерживает: **жирный**, *курсив*, __подчеркнутый__
+    """
+    # Заменяем пользовательское форматирование на Markdown
+    formatted_text = text
+    
+    # Жирный текст: **текст** -> <b>текст</b>
+    formatted_text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', formatted_text)
+    
+    # Курсив: *текст* -> <i>текст</i>
+    formatted_text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', formatted_text)
+    
+    # Подчеркнутый: __текст__ -> <u>текст</u>
+    formatted_text = re.sub(r'__(.*?)__', r'<u>\1</u>', formatted_text)
+    
+    # Моноширинный: `текст` -> <code>текст</code>
+    formatted_text = re.sub(r'`(.*?)`', r'<code>\1</code>', formatted_text)
+    
+    # Экранируем специальные символы HTML
+    formatted_text = formatted_text.replace('&', '&amp;')
+    formatted_text = formatted_text.replace('<', '&lt;')
+    formatted_text = formatted_text.replace('>', '&gt;')
+    
+    return formatted_text
+
+def send_formatted_message(chat_id, text, parse_mode='HTML'):
+    """
+    Отправляет сообщение с форматированием
+    """
+    try:
+        if parse_mode == 'HTML':
+            # Проверяем валидность HTML разметки
+            formatted_text = parse_text_formatting(text)
+            bot.send_message(chat_id, formatted_text, parse_mode='HTML')
+        else:
+            # Простой текст без форматирования
+            bot.send_message(chat_id, text, parse_mode='None')
+    except Exception as e:
+        # Если HTML разметка невалидна, отправляем как простой текст
+        logger.error(f"Ошибка форматирования: {e}")
+        bot.send_message(chat_id, text, parse_mode='None')
 
 # Исправление часового пояса (UTC+3 для Москвы)
 TIMEZONE_OFFSET = 3  # Часов для Московского времени
@@ -129,7 +175,6 @@ def publish_scheduled_posts():
         now = get_current_time()
         
         logger.info(f"🔍 Проверка постов... Найдено: {len(posts)}")
-        logger.info(f"⏰ Текущее время сервера: {format_time(now)}")
         
         published_count = 0
         for post in posts:
@@ -142,7 +187,10 @@ def publish_scheduled_posts():
             if time_left <= 0:
                 try:
                     logger.info(f"🚀 Публикую пост {post_id}: {message_text[:50]}...")
-                    bot.send_message(CHANNEL_ID, message_text)
+                    
+                    # Используем форматированную отправку
+                    send_formatted_message(CHANNEL_ID, message_text, parse_mode='HTML')
+                    
                     db.mark_as_published(post_id)
                     published_count += 1
                     logger.info(f"✅ Успешно опубликован пост ID: {post_id}")
@@ -211,12 +259,36 @@ def post_now_command(message):
         return
 
     try:
-        bot.send_message(CHANNEL_ID, text)
+        # Используем форматированную отправку
+        send_formatted_message(CHANNEL_ID, text, parse_mode='HTML')
         bot.reply_to(message, "✅ Пост опубликован в канал!")
         logger.info(f"Опубликован пост: {text[:50]}...")
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
         logger.error(f"Ошибка в post_now: {e}")
+
+@bot.message_handler(commands=['formatting'])
+def formatting_command(message):
+    """Справка по форматированию текста"""
+    help_text = """
+🎨 **Поддерживаемое форматирование:**
+
+**Жирный текст** - используйте двойные звездочки:
+`**жирный текст**` → **жирный текст**
+
+*Курсив* - используйте одинарные звездочки:
+`*курсив*` → *курсив*
+
+__Подчеркнутый__ - используйте двойное подчеркивание:
+`__подчеркнутый__` → __подчеркнутый__
+
+`Моноширинный` - используйте обратные кавычки:
+`` `код` `` → `код`
+
+**Пример:**
+`/schedule "**Важное** объявление *с курсивом* и __подчеркиванием__" 2024-01-15 15:00`
+"""
+    bot.reply_to(message, help_text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['schedule'])
 def schedule_command(message):
@@ -410,3 +482,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
