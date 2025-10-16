@@ -103,35 +103,56 @@ def stats_command(message):
         return
 
     try:
-        chat_info = bot.get_chat(CHANNEL_ID)
         current_time = get_current_time()
         
-        # Получаем количество постов из базы
+        # Получаем статистику из базы
         conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
         cursor = conn.cursor()
+        
         cursor.execute('SELECT COUNT(*) FROM scheduled_posts WHERE is_published = TRUE')
         published_count = cursor.fetchone()[0]
+        
         cursor.execute('SELECT COUNT(*) FROM scheduled_posts WHERE is_published = FALSE')
         pending_count = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM scheduled_posts')
+        total_count = cursor.fetchone()[0]
+        
+        # Последний опубликованный пост
+        cursor.execute('''
+            SELECT scheduled_time FROM scheduled_posts 
+            WHERE is_published = TRUE 
+            ORDER BY scheduled_time DESC 
+            LIMIT 1
+        ''')
+        last_post = cursor.fetchone()
+        last_post_time = last_post[0].strftime('%d.%m.%Y %H:%M') if last_post else 'Нет'
+        
         conn.close()
         
         stats_text = f"""
-📊 *Статистика канала:*
-
-🏷️ *Название:* {chat_info.title}
-👥 *Участники:* {getattr(chat_info, 'members_count', 'N/A')}
-📅 *Создан:* {chat_info.date.strftime('%d.%m.%Y')}
+📊 *Статистика бота:*
 
 📈 *Публикации:*
 ✅ Опубликовано: {published_count}
 ⏳ Ожидает: {pending_count}
-⏰ Время: {current_time.strftime('%H:%M')}
+📊 Всего: {total_count}
+
+🕒 *Временные данные:*
+⏰ Текущее время: {current_time.strftime('%H:%M')}
+📅 Сегодня: {current_time.strftime('%d.%m.%Y')}
+📮 Последний пост: {last_post_time}
+
+💾 *База данных:*
+🗃️ Таблицы: scheduled_posts
+🔧 Статус: ✅ Активна
         """
         
         bot.reply_to(message, stats_text, parse_mode='Markdown')
         
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка статистики: {e}")
+        logger.error(f"Ошибка статистики: {e}")
+        bot.reply_to(message, "❌ Ошибка получения статистики. Проверьте базу данных.")
 
 class DatabaseManager:
     def __init__(self):
@@ -619,6 +640,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
