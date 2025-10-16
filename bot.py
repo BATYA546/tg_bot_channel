@@ -504,6 +504,225 @@ def stats_command(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка статистики: {e}")
 
+# Добавляем в bot.py новые команды и обработчики
+
+# Словарь для хранения редактируемых постов
+editing_posts = {}
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    """Обработчик нажатий на инлайн-кнопки"""
+    try:
+        if call.data.startswith('approve_'):
+            content_id = int(call.data.split('_')[1])
+            bot.answer_callback_query(call.id, "✅ Контент одобрен!")
+            
+            # Получаем полный текст из базы
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT title, content FROM found_content WHERE id = %s', (content_id,))
+            result = cursor.fetchone()
+            
+            if result:
+                title, full_text = result
+                
+                # Показываем финальную версию для подтверждения
+                final_text = f"""
+✅ *КОНТЕНТ ОДОБРЕН*
+
+*Заголовок:* {title}
+
+*Текст для публикации:*
+{full_text}
+
+📅 Пост будет опубликован в ближайшее время.
+                """
+                
+                bot.edit_message_text(
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                    text=final_text,
+                    parse_mode='Markdown'
+                )
+            
+            logger.info(f"✅ Контент {content_id} одобрен для публикации")
+            
+        elif call.data.startswith('reject_'):
+            content_id = int(call.data.split('_')[1])
+            bot.answer_callback_query(call.id, "❌ Контент отклонен")
+            
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="❌ *Контент отклонен*",
+                parse_mode='Markdown'
+            )
+            
+            logger.info(f"❌ Контент {content_id} отклонен")
+            
+        elif call.data.startswith('edit_'):
+            content_id = int(call.data.split('_')[1])
+            bot.answer_callback_query(call.id, "✏️ Загружаем полный текст...")
+            
+            # Получаем полный текст из базы
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT title, content FROM found_content WHERE id = %s', (content_id,))
+            result = cursor.fetchone()
+            
+            if result:
+                title, full_text = result
+                
+                # Сохраняем в памяти для редактирования
+                editing_posts[call.message.chat.id] = content_id
+                
+                # Показываем полный текст для редактирования
+                edit_message = f"""
+✏️ *РЕДАКТИРОВАНИЕ ПОСТА #{content_id}*
+
+*Текущий заголовок:*
+{title}
+
+*Текущий текст:*
+{full_text}
+
+📝 *Отправьте новый текст в формате:*
+Заголовок
+(пустая строка)
+Текст поста
+
+*Пример:*
+Ученые создали революционный материал
+(пустая строка)
+Исследователи разработали уникальный материал, который может изменить будущее технологий. Это открытие позволит создавать более эффективные устройства.
+                """
+                
+                # Сначала редактируем исходное сообщение
+                bot.edit_message_text(
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                    text="✏️ *Режим редактирования*",
+                    parse_mode='Markdown'
+                )
+                
+                # Затем отправляем полный текст для редактирования
+                bot.send_message(
+                    call.message.chat.id,
+                    edit_message,
+                    parse_mode='Markdown'
+                )
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки callback: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка обработки")
+
+# Добавляем обработчик текстовых сообщений для редактирования
+@bot.message_handler(func=lambda message: message.chat.id in editing_posts)
+def handle_edit_text(message):
+    """Обрабатывает редактирование текста поста"""
+    try:
+        content_id = editing_posts.pop(message.chat.id, None)
+        if not content_id:
+            return
+            
+        text = message.text.strip()
+        
+        # Парсим новый текст (разделяем заголовок и контент)
+        parts = text.split('\n\n', 1)
+        if len(parts) == 2:
+            new_title, new_content = parts[0].strip(), parts[1].strip()
+        else:
+            # Если нет разделения, используем первую строку как заголовок
+            lines = text.split('\n')
+            new_title = lines[0].strip()
+            new_content = '\n'.join(lines[1:]).strip() if len(lines) > 1 else new_title
+        
+        # Обновляем в базе
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE found_content 
+            SET title = %s, content = %s 
+            WHERE id = %s
+        ''', (new_title, new_content, content_id))
+        conn.commit()
+        
+        # Показываем обновленную версию
+        updated_preview = f"""
+✏️ *ТЕКСТ ОБНОВЛЕН*
+
+*Новый заголовок:*
+{new_title}
+
+*Новый текст:*
+{new_content}
+
+✅ Изменения сохранены. Теперь можете одобрить пост.
+        """
+        
+        # Создаем новую клавиатуру для обновленного поста
+        markup = telebot.types.InlineKeyboardMarkup()
+        markup.row(
+            telebot.types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{content_id}"),
+            telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
+            telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
+        )
+        
+        bot.send_message(
+            message.chat.id,
+            updated_preview,
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+        
+        logger.info(f"✏️ Контент {content_id} отредактирован")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка редактирования: {e}")
+        bot.reply_to(message, f"❌ Ошибка при сохранении: {e}")
+
+# Добавляем команду для просмотра всех найденных постов
+@bot.message_handler(commands=['view_found'])
+def view_found_command(message):
+    """Показывает все найденные посты"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+
+    try:
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, title, content, category, is_approved, is_published
+            FROM found_content 
+            ORDER BY found_at DESC 
+            LIMIT 10
+        ''')
+        posts = cursor.fetchall()
+        
+        if not posts:
+            bot.reply_to(message, "📭 Нет найденных постов")
+            return
+        
+        response = "📋 *Последние найденные посты:*\n\n"
+        for post in posts:
+            post_id, title, content, category, approved, published = post
+            
+            status = "✅ Одобрен" if approved else "⏳ На модерации"
+            status += " 📤 Опубликован" if published else ""
+            
+            response += f"🆔 {post_id} | {status}\n"
+            response += f"📁 {category}\n"
+            response += f"📝 {title[:50]}...\n"
+            response += "─" * 30 + "\n"
+        
+        bot.reply_to(message, response, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка просмотра постов: {e}")
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+
 # Добавляем после всех message_handler
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
@@ -569,6 +788,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
