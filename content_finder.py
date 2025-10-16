@@ -89,7 +89,8 @@ class ContentFinder:
 
     def format_for_preview(self, content):
         """Форматирует контент для предпросмотра"""
-        return f"📰 ПРЕДПРОСМОТР ПОСТА\n\n{content['summary']}\n\n⏰ Сгенерировано: {content['found_date'].strftime('%H:%M %d.%m.%Y')}"
+        current_time = datetime.now()
+        return f"📰 ПРЕДПРОСМОТР ПОСТА\n\n{content['summary']}\n\n⏰ Сгенерировано: {current_time.strftime('%H:%M %d.%m.%Y')}"
 
 def setup_content_finder():
     """Инициализация системы поиска контента"""
