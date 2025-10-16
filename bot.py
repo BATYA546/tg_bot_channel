@@ -27,20 +27,17 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Исправление часового пояса (UTC+3 для Москвы)
-TIMEZONE_OFFSET = 3
-
-# Импорт content_finder
-try:
-    from content_finder import setup_content_finder
-    CONTENT_FINDER_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"❌ ContentFinder не доступен: {e}")
-    CONTENT_FINDER_AVAILABLE = False
-
+# Исправляем функцию get_current_time
 def get_current_time():
     """Возвращает текущее время с поправкой на часовой пояс"""
     return datetime.utcnow() + timedelta(hours=TIMEZONE_OFFSET)
+
+# Или лучше использовать timezone-aware datetime:
+from datetime import timezone
+
+def get_current_time():
+    """Возвращает текущее время с правильным часовым поясом"""
+    return datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_OFFSET)
 
 class DatabaseManager:
     def __init__(self):
@@ -727,5 +724,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
