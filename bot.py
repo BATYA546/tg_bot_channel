@@ -12,50 +12,32 @@ import telebot
 from telebot import types
 from dotenv import load_dotenv
 
-# Добавьте в начало после импортов
-def parse_text_formatting(text):
+def send_formatted_message(chat_id, text):
     """
-    Преобразует пользовательское форматирование в Markdown для Telegram
-    Поддерживает: **жирный**, *курсив*, __подчеркнутый__
-    """
-    # Заменяем пользовательское форматирование на Markdown
-    formatted_text = text
-    
-    # Жирный текст: **текст** -> <b>текст</b>
-    formatted_text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', formatted_text)
-    
-    # Курсив: *текст* -> <i>текст</i>
-    formatted_text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', formatted_text)
-    
-    # Подчеркнутый: __текст__ -> <u>текст</u>
-    formatted_text = re.sub(r'__(.*?)__', r'<u>\1</u>', formatted_text)
-    
-    # Моноширинный: `текст` -> <code>текст</code>
-    formatted_text = re.sub(r'`(.*?)`', r'<code>\1</code>', formatted_text)
-    
-    # Экранируем специальные символы HTML
-    formatted_text = formatted_text.replace('&', '&amp;')
-    formatted_text = formatted_text.replace('<', '&lt;')
-    formatted_text = formatted_text.replace('>', '&gt;')
-    
-    return formatted_text
-
-def send_formatted_message(chat_id, text, parse_mode='HTML'):
-    """
-    Отправляет сообщение с форматированием
+    Простая отправка с автоматическим определением формата
     """
     try:
-        if parse_mode == 'HTML':
-            # Проверяем валидность HTML разметки
-            formatted_text = parse_text_formatting(text)
-            bot.send_message(chat_id, formatted_text, parse_mode='HTML')
-        else:
-            # Простой текст без форматирования
-            bot.send_message(chat_id, text, parse_mode='None')
+        # Сначала пробуем Markdown
+        bot.send_message(chat_id, text, parse_mode='Markdown')
+        return True
     except Exception as e:
-        # Если HTML разметка невалидна, отправляем как простой текст
-        logger.error(f"Ошибка форматирования: {e}")
-        bot.send_message(chat_id, text, parse_mode='None')
+        try:
+            # Если Markdown не работает, пробуем HTML
+            html_text = text
+            html_text = html_text.replace('**', '<b>').replace('**', '</b>')
+            html_text = html_text.replace('*', '<i>').replace('*', '</i>')
+            html_text = html_text.replace('__', '<u>').replace('__', '</u>')
+            html_text = html_text.replace('`', '<code>').replace('`', '</code>')
+            bot.send_message(chat_id, html_text, parse_mode='HTML')
+            return True
+        except Exception as e2:
+            try:
+                # Если ничего не работает, отправляем как простой текст
+                bot.send_message(chat_id, text, parse_mode=None)
+                return True
+            except Exception as e3:
+                logger.error(f"Не удалось отправить сообщение: {e3}")
+                return False
 
 # Исправление часового пояса (UTC+3 для Москвы)
 TIMEZONE_OFFSET = 3  # Часов для Московского времени
@@ -181,21 +163,21 @@ def publish_scheduled_posts():
             post_id, message_text, scheduled_time = post
             
             time_left = (scheduled_time - now).total_seconds()
-            logger.info(f"📋 Пост {post_id}: запланирован на {format_time(scheduled_time)}, осталось {time_left:.0f} сек")
             
-            # Публикуем если время наступило ИЛИ прошло
             if time_left <= 0:
                 try:
                     logger.info(f"🚀 Публикую пост {post_id}: {message_text[:50]}...")
                     
-                    # Используем форматированную отправку
-                    send_formatted_message(CHANNEL_ID, message_text, parse_mode='HTML')
+                    # Используем умную отправку
+                    success = send_formatted_message(CHANNEL_ID, message_text)
                     
-                    db.mark_as_published(post_id)
-                    published_count += 1
-                    logger.info(f"✅ Успешно опубликован пост ID: {post_id}")
+                    if success:
+                        db.mark_as_published(post_id)
+                        published_count += 1
+                        logger.info(f"✅ Успешно опубликован пост ID: {post_id}")
+                    else:
+                        logger.error(f"❌ Не удалось опубликовать пост ID: {post_id}")
                     
-                    # Пауза между публикациями
                     time.sleep(1)
                     
                 except Exception as e:
@@ -208,42 +190,6 @@ def publish_scheduled_posts():
                 
     except Exception as e:
         logger.error(f"❌ Ошибка в publish_scheduled_posts: {e}")
-
-def post_scheduler():
-    """Планировщик постов"""
-    logger.info("🕒 Запущен планировщик постов...")
-    
-    while True:
-        try:
-            publish_scheduled_posts()
-            time.sleep(30)  # Проверяем каждые 30 секунд
-            
-        except Exception as e:
-            logger.error(f"💥 Ошибка в планировщике: {e}")
-            time.sleep(30)
-
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    """Команда start"""
-    if str(message.from_user.id) != ADMIN_ID:
-        bot.reply_to(message, "⛔ Нет прав!")
-        return
-    
-    current_time = get_current_time()
-    
-    bot.reply_to(message,
-        f"🤖 Бот для управления каналом запущен!\n"
-        f"⏰ Текущее время: {current_time.strftime('%d.%m.%Y %H:%M')}\n\n"
-        "Команды:\n"
-        "/post_now текст - опубликовать сейчас\n"
-        "/schedule \"текст\" 2024-01-15 15:00 - запланировать\n"
-        "/list_posts - список постов\n"
-        "/debug_posts - отладка\n"
-        "/help - справка\n\n"
-        "Примеры:\n"
-        "/post_now Привет мир!\n"
-        '/schedule "Важное сообщение" 2024-01-15 15:30'
-    )
 
 @bot.message_handler(commands=['post_now'])
 def post_now_command(message):
@@ -259,10 +205,12 @@ def post_now_command(message):
         return
 
     try:
-        # Используем форматированную отправку
-        send_formatted_message(CHANNEL_ID, text, parse_mode='HTML')
-        bot.reply_to(message, "✅ Пост опубликован в канал!")
-        logger.info(f"Опубликован пост: {text[:50]}...")
+        success = send_formatted_message(CHANNEL_ID, text)
+        if success:
+            bot.reply_to(message, "✅ Пост опубликован в канал!")
+            logger.info(f"Опубликован пост: {text[:50]}...")
+        else:
+            bot.reply_to(message, "❌ Не удалось опубликовать пост")
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
         logger.error(f"Ошибка в post_now: {e}")
@@ -482,4 +430,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
