@@ -9,6 +9,13 @@ from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from content_finder import setup_content_finder
+# В импорты добавляем:
+try:
+    from content_finder import setup_content_finder
+    CONTENT_FINDER_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"❌ ContentFinder не доступен: {e}")
+    CONTENT_FINDER_AVAILABLE = False
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -159,38 +166,50 @@ def add_found_content(self, content_data):
 
 # Добавляем команду для ручного поиска контента
 @bot.message_handler(commands=['find_content'])
+@bot.message_handler(commands=['find_content'])
 def find_content_command(message):
     """Ручной поиск контента"""
     if str(message.from_user.id) != ADMIN_ID:
         bot.reply_to(message, "⛔ Нет прав!")
         return
 
+    if not CONTENT_FINDER_AVAILABLE:
+        bot.reply_to(message, "❌ Модуль поиска контента не доступен")
+        return
+
     try:
         bot.reply_to(message, "🔍 Начинаю поиск контента...")
         
-        # Инициализируем поисковик
         finder = setup_content_finder()
         found_content = finder.search_content(max_posts=3)
         
         if found_content:
             for content in found_content:
-                # Сохраняем в базу
                 content_id = db.add_found_content(content)
                 
-                # Отправляем превью админу
                 preview = finder.format_for_preview(content)
+                
+                # Создаем клавиатуру
+                markup = telebot.types.InlineKeyboardMarkup()
+                markup.row(
+                    telebot.types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{content_id}"),
+                    telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
+                    telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
+                )
+                
                 bot.send_message(
-                    ADMIN_ID, 
+                    message.chat.id, 
                     preview, 
                     parse_mode='Markdown',
-                    reply_markup=create_moderation_keyboard(content_id)
+                    reply_markup=markup
                 )
             
-            bot.reply_to(message, f"✅ Найдено {len(found_content)} материалов. Проверьте предложения!")
+            bot.reply_to(message, f"✅ Найдено {len(found_content)} материалов. Проверьте предложения выше!")
         else:
             bot.reply_to(message, "❌ Не найдено подходящего контента.")
             
     except Exception as e:
+        logger.error(f"❌ Ошибка поиска контента: {e}")
         bot.reply_to(message, f"❌ Ошибка поиска: {e}")
 
 def create_moderation_keyboard(content_id):
@@ -488,6 +507,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
