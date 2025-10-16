@@ -53,31 +53,72 @@ def download_image(image_url):
             
         logger.info(f"📥 Загружаю изображение: {image_url}")
         
-        # Добавляем правильные заголовки для Wikimedia
+        # Для Wikimedia используем специальный подход
+        if 'wikimedia.org' in image_url or 'wikipedia.org' in image_url:
+            return download_wikimedia_image(image_url)
+        
+        # Для других сайтов используем стандартный подход
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Referer': 'https://commons.wikimedia.org/'
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
         }
         
         response = requests.get(image_url, headers=headers, timeout=15)
         if response.status_code == 200:
-            # Проверяем что это действительно изображение
-            try:
-                image = Image.open(io.BytesIO(response.content))
-                logger.info(f"✅ Изображение загружено: {image.size[0]}x{image.size[1]}, размер: {len(response.content)} байт")
-                return response.content
-            except Exception as img_error:
-                logger.error(f"❌ Ошибка обработки изображения: {img_error}")
-                return None
+            image = Image.open(io.BytesIO(response.content))
+            logger.info(f"✅ Изображение загружено: {image.size[0]}x{image.size[1]}")
+            return response.content
         else:
-            logger.error(f"❌ Ошибка HTTP {response.status_code} при загрузке изображения")
-            logger.error(f"❌ Ответ сервера: {response.text[:200]}")
+            logger.error(f"❌ Ошибка HTTP {response.status_code}")
             return None
             
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки изображения: {e}")
+        return None
+
+def download_wikimedia_image(wikimedia_url):
+    """Специальная функция для загрузки изображений с Wikimedia"""
+    try:
+        # Извлекаем название файла из URL
+        if '#/media/Файл:' in wikimedia_url:
+            filename = wikimedia_url.split('#/media/Файл:')[-1]
+        elif 'File:' in wikimedia_url:
+            filename = wikimedia_url.split('File:')[-1].split('#')[0]
+        else:
+            logger.error(f"❌ Не могу распарсить Wikimedia URL: {wikimedia_url}")
+            return None
+        
+        # Декодируем URL-encoded символы
+        filename = urllib.parse.unquote(filename)
+        
+        # Создаем прямой URL к файлу на upload.wikimedia.org
+        # Формат: https://upload.wikimedia.org/wikipedia/commons/thumb/hash/filename/500px-filename
+        import hashlib
+        md5 = hashlib.md5(filename.encode('utf-8')).hexdigest()
+        
+        # Создаем URL для превью 500px
+        direct_url = f"https://upload.wikimedia.org/wikipedia/commons/thumb/{md5[0]}/{md5[0:2]}/{filename}/500px-{filename}"
+        
+        logger.info(f"🔄 Прямой URL Wikimedia: {direct_url}")
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+            'Referer': 'https://commons.wikimedia.org/'
+        }
+        
+        response = requests.get(direct_url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            image = Image.open(io.BytesIO(response.content))
+            logger.info(f"✅ Wikimedia изображение загружено: {image.size[0]}x{image.size[1]}")
+            return response.content
+        else:
+            logger.error(f"❌ Ошибка HTTP {response.status_code} для Wikimedia")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки Wikimedia изображения: {e}")
         return None
 
 def send_post_with_image(chat_id, text, image_data=None):
@@ -801,4 +842,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
