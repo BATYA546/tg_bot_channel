@@ -3,7 +3,10 @@ import logging
 import threading
 import time
 import re
+import requests
+import io
 from datetime import datetime, timedelta, timezone
+from PIL import Image
 import telebot
 from dotenv import load_dotenv
 import psycopg2
@@ -41,6 +44,66 @@ except ImportError as e:
 def get_current_time():
     """Возвращает текущее время с правильным часовым поясом"""
     return datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_OFFSET)
+
+def download_image(image_url):
+    """Скачивает изображение по URL"""
+    try:
+        if not image_url:
+            return None
+            
+        logger.info(f"📥 Загружаю изображение: {image_url}")
+        
+        response = requests.get(image_url, timeout=15)
+        if response.status_code == 200:
+            # Проверяем что это действительно изображение
+            try:
+                image = Image.open(io.BytesIO(response.content))
+                logger.info(f"✅ Изображение загружено: {image.size[0]}x{image.size[1]}")
+                return response.content
+            except Exception as img_error:
+                logger.error(f"❌ Ошибка обработки изображения: {img_error}")
+                return None
+        else:
+            logger.error(f"❌ Ошибка HTTP {response.status_code} при загрузке изображения")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки изображения: {e}")
+        return None
+
+def send_post_with_image(chat_id, text, image_data=None):
+    """Отправляет пост с изображением"""
+    try:
+        if image_data:
+            # Отправляем фото с подписью
+            bot.send_photo(chat_id, image_data, caption=text)
+            logger.info(f"✅ Пост с изображением отправлен в {chat_id}")
+        else:
+            # Отправляем просто текст
+            bot.send_message(chat_id, text)
+            logger.info(f"✅ Текстовый пост отправлен в {chat_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки поста с изображением: {e}")
+        # Пробуем отправить без изображения
+        try:
+            bot.send_message(chat_id, text)
+            logger.info(f"✅ Пост отправлен без изображения в {chat_id}")
+            return True
+        except Exception as e2:
+            logger.error(f"❌ Критическая ошибка отправки: {e2}")
+            return False
+
+def send_formatted_message(chat_id, text):
+    """Простая отправка сообщений без форматирования"""
+    try:
+        # Просто отправляем как обычный текст
+        bot.send_message(chat_id, text)
+        logger.info(f"✅ Сообщение отправлено в {chat_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки сообщения: {e}")
+        return False
 
 class DatabaseManager:
     def __init__(self):
@@ -149,14 +212,15 @@ class DatabaseManager:
             cursor = conn.cursor()
             
             cursor.execute('''
-                INSERT INTO found_content (title, content, category, url)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO found_content (title, content, category, url, image_url)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING id
             ''', (
                 content_data['title'], 
                 content_data['summary'], 
                 content_data['category'], 
-                content_data.get('url', '')
+                content_data.get('url', ''),
+                content_data.get('image_url', '')
             ))
             
             conn.commit()
@@ -171,10 +235,10 @@ class DatabaseManager:
     def get_found_content(self, content_id):
         """Получает найденный контент по ID"""
         try:
-            conn = self.get_connection()
+            conn = db.get_connection()
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT id, title, content, category, is_approved, is_published
+                SELECT id, title, content, category, is_approved, is_published, image_url
                 FROM found_content 
                 WHERE id = %s
             ''', (content_id,))
@@ -190,32 +254,33 @@ db = DatabaseManager()
 # Словарь для хранения редактируемых постов
 editing_posts = {}
 
-def send_formatted_message(chat_id, text):
-    """Простая отправка сообщений без форматирования"""
-    try:
-        # Просто отправляем как обычный текст
-        bot.send_message(chat_id, text)
-        logger.info(f"✅ Сообщение отправлено в {chat_id}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки сообщения: {e}")
-        return False
-
 def publish_approved_post(content_id):
     """Публикует одобренный пост в канал"""
     try:
         # Получаем контент из базы
         conn = db.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT content FROM found_content WHERE id = %s', (content_id,))
+        cursor.execute('SELECT content, image_url FROM found_content WHERE id = %s', (content_id,))
         result = cursor.fetchone()
         
         if result:
-            full_post_text = result[0]
-            logger.info(f"📤 Публикую пост {content_id}: {full_post_text}")
+            full_post_text, image_url = result
+            logger.info(f"📤 Публикую пост {content_id}")
+            logger.info(f"🖼️ URL изображения: {image_url}")
+            
+            # Скачиваем изображение если есть
+            image_data = None
+            if image_url and image_url.startswith('http'):
+                image_data = download_image(image_url)
+                if image_data:
+                    logger.info(f"✅ Изображение загружено для поста {content_id}")
+                else:
+                    logger.warning(f"⚠️ Не удалось загрузить изображение для поста {content_id}")
+            else:
+                logger.warning(f"⚠️ Некорректный URL изображения: {image_url}")
             
             # Публикуем в канал
-            success = send_formatted_message(CHANNEL_ID, full_post_text)
+            success = send_post_with_image(CHANNEL_ID, full_post_text, image_data)
             
             if success:
                 # Отмечаем как опубликованный
@@ -510,7 +575,7 @@ def find_content_command(message):
         bot.reply_to(message, "🔍 Начинаю поиск контента...")
         
         finder = setup_content_finder()
-        found_content = finder.search_content(max_posts=3)
+        found_content = finder.search_content(max_posts=2)
         
         if found_content:
             for content in found_content:
@@ -562,7 +627,7 @@ def view_found_command(message):
         posts = cursor.fetchall()
         
         if not posts:
-            bot.reply_to(message, "📭 Нет найденных постов")
+            bot.reply_to(message, "📭 Нет найденных посты")
             return
         
         response = "📋 Последние найденные посты:\n\n"
@@ -594,11 +659,11 @@ def handle_callback(call):
             # Получаем полный текст из базы
             conn = db.get_connection()
             cursor = conn.cursor()
-            cursor.execute('SELECT content FROM found_content WHERE id = %s', (content_id,))
+            cursor.execute('SELECT content, image_url FROM found_content WHERE id = %s', (content_id,))
             result = cursor.fetchone()
             
             if result:
-                full_post_text = result[0]
+                full_post_text, image_url = result
                 
                 # Сразу публикуем в канал
                 success = publish_approved_post(content_id)
