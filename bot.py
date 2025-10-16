@@ -74,14 +74,13 @@ class DatabaseManager:
                 )
             ''')
             
-            # НОВАЯ ТАБЛИЦА для найденного контента
+            # Таблица для найденного контента
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS found_content (
                     id SERIAL PRIMARY KEY,
                     title TEXT,
                     content TEXT,
                     category VARCHAR(50),
-                    source VARCHAR(100),
                     url TEXT,
                     image_url TEXT,
                     is_approved BOOLEAN DEFAULT FALSE,
@@ -143,32 +142,49 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Error marking post: {e}")
 
-    # НОВЫЙ МЕТОД - добавляем его
-def add_found_content(self, content_data):
-    """Сохраняет найденный контент в базу"""
-    try:
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO found_content (title, content, category, url)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id
-        ''', (
-            content_data['title'], 
-            content_data['summary'], 
-            content_data['category'], 
-            content_data.get('url', '')  # url теперь необязательный
-        ))
-        
-        conn.commit()
-        content_id = cursor.fetchone()[0]
-        logger.info(f"✅ Сохранен найденный контент ID: {content_id}")
-        return content_id
-        
-    except Exception as e:
-        logger.error(f"❌ Error saving found content: {e}")
-        raise
+    # ДОБАВЛЯЕМ ЭТОТ МЕТОД - найденный контент
+    def add_found_content(self, content_data):
+        """Сохраняет найденный контент в базу"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO found_content (title, content, category, url)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id
+            ''', (
+                content_data['title'], 
+                content_data['summary'], 
+                content_data['category'], 
+                content_data.get('url', '')
+            ))
+            
+            conn.commit()
+            content_id = cursor.fetchone()[0]
+            logger.info(f"✅ Сохранен найденный контент ID: {content_id}")
+            return content_id
+            
+        except Exception as e:
+            logger.error(f"❌ Error saving found content: {e}")
+            raise
+
+    # Дополнительный метод для получения контента по ID
+    def get_found_content(self, content_id):
+        """Получает найденный контент по ID"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, title, content, category, is_approved, is_published
+                FROM found_content 
+                WHERE id = %s
+            ''', (content_id,))
+            result = cursor.fetchone()
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error getting found content: {e}")
+            return None
 
 # Инициализация БД
 db = DatabaseManager()
@@ -787,6 +803,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
