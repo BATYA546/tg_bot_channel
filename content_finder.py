@@ -268,26 +268,26 @@ class ContentFinder:
         
         return content_list
 
-    def format_for_preview(self, content):
-        """Форматирует контент для предпросмотра"""
-        # Создаем эмодзи для категорий
-        category_emojis = {
-            'technology': '🔧',
-            'science': '🔬', 
-            'records': '🏆',
-            'discovery': '💡'
-        }
-        
-        emoji = category_emojis.get(content['category'], '📰')
-        
-        return f"""
+# В методе format_for_preview меняем:
+def format_for_preview(self, content):
+    """Форматирует контент для предпросмотра"""
+    # Создаем эмодзи для категорий
+    category_emojis = {
+        'technology': '🔧',
+        'science': '🔬', 
+        'records': '🏆',
+        'discovery': '💡'
+    }
+    
+    emoji = category_emojis.get(content['category'], '📰')
+    
+    return f"""
 {emoji} *Новый материал для публикации*
 
 *Заголовок:* {content['title']}
 *Категория:* {content['category']}
-*Источник:* {content['source']}
 
-*Текст:*
+*Полный текст:*
 {content['summary']}
 
 ⏰ Найдено: {content['found_date'].strftime('%H:%M %d.%m.%Y')}
