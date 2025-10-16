@@ -4,52 +4,21 @@ import sqlite3
 import threading
 import time
 import random
-import requests
 import re
 from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
 import telebot
-from telebot import types
 from dotenv import load_dotenv
 
-def send_formatted_message(chat_id, text):
-    """
-    Простая отправка с автоматическим определением формата
-    """
-    try:
-        # Сначала пробуем Markdown
-        bot.send_message(chat_id, text, parse_mode='Markdown')
-        return True
-    except Exception as e:
-        try:
-            # Если Markdown не работает, пробуем HTML
-            html_text = text
-            html_text = html_text.replace('**', '<b>').replace('**', '</b>')
-            html_text = html_text.replace('*', '<i>').replace('*', '</i>')
-            html_text = html_text.replace('__', '<u>').replace('__', '</u>')
-            html_text = html_text.replace('`', '<code>').replace('`', '</code>')
-            bot.send_message(chat_id, html_text, parse_mode='HTML')
-            return True
-        except Exception as e2:
-            try:
-                # Если ничего не работает, отправляем как простой текст
-                bot.send_message(chat_id, text, parse_mode=None)
-                return True
-            except Exception as e3:
-                logger.error(f"Не удалось отправить сообщение: {e3}")
-                return False
-
 # Исправление часового пояса (UTC+3 для Москвы)
-TIMEZONE_OFFSET = 3  # Часов для Московского времени
+TIMEZONE_OFFSET = 3
 
 def get_current_time():
     """Возвращает текущее время с поправкой на часовой пояс"""
     return datetime.utcnow() + timedelta(hours=TIMEZONE_OFFSET)
 
 def parse_schedule_time(date_str, time_str):
-    """Парсит время планирования с учетом часового пояса"""
-    naive_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-    return naive_time
+    """Парсит время планирования"""
+    return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
 
 def format_time(dt):
     """Форматирует время для отображения"""
@@ -150,6 +119,35 @@ class DatabaseManager:
 # Инициализация БД
 db = DatabaseManager()
 
+def send_formatted_message(chat_id, text):
+    """
+    Умная отправка сообщений с форматированием
+    """
+    try:
+        # Сначала пробуем Markdown
+        bot.send_message(chat_id, text, parse_mode='Markdown')
+        return True
+    except Exception as e:
+        try:
+            # Если Markdown не работает, пробуем HTML
+            html_text = text
+            # Заменяем Markdown на HTML теги
+            html_text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', html_text)
+            html_text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', html_text)
+            html_text = re.sub(r'__(.*?)__', r'<u>\1</u>', html_text)
+            html_text = re.sub(r'`(.*?)`', r'<code>\1</code>', html_text)
+            bot.send_message(chat_id, html_text, parse_mode='HTML')
+            return True
+        except Exception as e2:
+            try:
+                # Если ничего не работает, отправляем как простой текст
+                plain_text = re.sub(r'[\*_`]', '', text)  # Убираем форматирование
+                bot.send_message(chat_id, plain_text, parse_mode=None)
+                return True
+            except Exception as e3:
+                logger.error(f"Не удалось отправить сообщение: {e3}")
+                return False
+
 def publish_scheduled_posts():
     """Публикует запланированные посты"""
     try:
@@ -157,13 +155,16 @@ def publish_scheduled_posts():
         now = get_current_time()
         
         logger.info(f"🔍 Проверка постов... Найдено: {len(posts)}")
+        logger.info(f"⏰ Текущее время сервера: {format_time(now)}")
         
         published_count = 0
         for post in posts:
             post_id, message_text, scheduled_time = post
             
             time_left = (scheduled_time - now).total_seconds()
+            logger.info(f"📋 Пост {post_id}: запланирован на {format_time(scheduled_time)}, осталось {time_left:.0f} сек")
             
+            # Публикуем если время наступило ИЛИ прошло
             if time_left <= 0:
                 try:
                     logger.info(f"🚀 Публикую пост {post_id}: {message_text[:50]}...")
@@ -178,6 +179,7 @@ def publish_scheduled_posts():
                     else:
                         logger.error(f"❌ Не удалось опубликовать пост ID: {post_id}")
                     
+                    # Пауза между публикациями
                     time.sleep(1)
                     
                 except Exception as e:
@@ -190,6 +192,59 @@ def publish_scheduled_posts():
                 
     except Exception as e:
         logger.error(f"❌ Ошибка в publish_scheduled_posts: {e}")
+
+def post_scheduler():
+    """Планировщик постов"""
+    logger.info("🕒 Запущен планировщик постов...")
+    
+    while True:
+        try:
+            publish_scheduled_posts()
+            time.sleep(30)  # Проверяем каждые 30 секунд
+            
+        except Exception as e:
+            logger.error(f"💥 Ошибка в планировщике: {e}")
+            time.sleep(30)
+
+def safe_polling():
+    """Безопасный запуск бота с обработкой конфликтов"""
+    while True:
+        try:
+            logger.info("🔄 Запуск бота...")
+            bot.polling(none_stop=True, interval=1, timeout=60)
+            
+        except Exception as e:
+            if "409" in str(e):
+                logger.warning("⚠️ Другой экземпляр бота уже запущен. Жду 10 секунд...")
+                time.sleep(10)
+            else:
+                logger.error(f"❌ Ошибка: {e}")
+                logger.info("🔄 Перезапуск бота через 30 секунд...")
+                time.sleep(30)
+
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    """Команда start"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+    
+    current_time = get_current_time()
+    
+    bot.reply_to(message,
+        f"🤖 Бот для управления каналом запущен!\n"
+        f"⏰ Текущее время: {current_time.strftime('%d.%m.%Y %H:%M')}\n\n"
+        "Команды:\n"
+        "/post_now текст - опубликовать сейчас\n"
+        "/schedule \"текст\" 2024-01-15 15:00 - запланировать\n"
+        "/list_posts - список постов\n"
+        "/debug_posts - отладка\n"
+        "/formatting - справка по форматированию\n"
+        "/help - справка\n\n"
+        "Примеры:\n"
+        "/post_now Привет мир!\n"
+        '/schedule "**Важное** сообщение" 2024-01-15 15:30'
+    )
 
 @bot.message_handler(commands=['post_now'])
 def post_now_command(message):
@@ -215,29 +270,6 @@ def post_now_command(message):
         bot.reply_to(message, f"❌ Ошибка: {e}")
         logger.error(f"Ошибка в post_now: {e}")
 
-@bot.message_handler(commands=['formatting'])
-def formatting_command(message):
-    """Справка по форматированию текста"""
-    help_text = """
-🎨 **Поддерживаемое форматирование:**
-
-**Жирный текст** - используйте двойные звездочки:
-`**жирный текст**` → **жирный текст**
-
-*Курсив* - используйте одинарные звездочки:
-`*курсив*` → *курсив*
-
-__Подчеркнутый__ - используйте двойное подчеркивание:
-`__подчеркнутый__` → __подчеркнутый__
-
-`Моноширинный` - используйте обратные кавычки:
-`` `код` `` → `код`
-
-**Пример:**
-`/schedule "**Важное** объявление *с курсивом* и __подчеркиванием__" 2024-01-15 15:00`
-"""
-    bot.reply_to(message, help_text, parse_mode='Markdown')
-
 @bot.message_handler(commands=['schedule'])
 def schedule_command(message):
     """Планирование поста"""
@@ -253,7 +285,7 @@ def schedule_command(message):
             'Использование: /schedule "Текст поста" ГГГГ-ММ-ДД ЧЧ:ММ\n\n'
             'Примеры:\n'
             '/schedule "Привет мир" 2024-01-15 15:30\n'
-            '/schedule "Важное объявление" 2024-01-15 16:00'
+            '/schedule "**Важное** объявление" 2024-01-15 16:00'
         )
         return
 
@@ -388,6 +420,29 @@ def debug_posts_command(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка отладки: {e}")
 
+@bot.message_handler(commands=['formatting'])
+def formatting_command(message):
+    """Справка по форматированию текста"""
+    help_text = """
+🎨 **Поддерживаемое форматирование:**
+
+**Жирный текст** - используйте двойные звездочки:
+`**жирный текст**` → **жирный текст**
+
+*Курсив* - используйте одинарные звездочки:
+`*курсив*` → *курсив*
+
+__Подчеркнутый__ - используйте двойное подчеркивание:
+`__подчеркнутый__` → __подчеркнутый__
+
+`Моноширинный` - используйте обратные кавычки:
+`` `код` `` → `код`
+
+**Пример:**
+`/schedule "**Важное** объявление *с курсивом* и __подчеркиванием__" 2024-01-15 15:00`
+"""
+    bot.reply_to(message, help_text, parse_mode='Markdown')
+
 @bot.message_handler(commands=['help'])
 def help_command(message):
     """Команда помощи"""
@@ -400,9 +455,10 @@ def help_command(message):
         "/schedule [текст] [дата] [время] - запланировать пост\n"
         "/list_posts - показать запланированные посты\n"
         "/debug_posts - отладка постов\n"
+        "/formatting - справка по форматированию\n"
         "/help - эта справка\n\n"
         "📅 Формат даты: ГГГГ-ММ-ДД ЧЧ:ММ\n"
-        "Пример: /schedule \"Важное сообщение\" 2024-01-15 17:00"
+        "Пример: /schedule \"**Важное сообщение**\" 2024-01-15 17:00"
     )
 
 def main():
@@ -421,14 +477,9 @@ def main():
     scheduler_thread = threading.Thread(target=post_scheduler, daemon=True)
     scheduler_thread.start()
     
-    # Запускаем бота
+    # Запускаем бота с безопасным polling
     logger.info("Бот готов к работе! Используйте /start в Telegram")
-    try:
-        bot.polling(none_stop=True, interval=1)
-    except Exception as e:
-        logger.error(f"Ошибка при запуске бота: {e}")
+    safe_polling()
 
 if __name__ == '__main__':
     main()
-
-
