@@ -62,6 +62,8 @@ class DatabaseManager:
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
+            
+            # Таблица для запланированных постов
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS scheduled_posts (
                     id SERIAL PRIMARY KEY,
@@ -71,6 +73,23 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
+            # НОВАЯ ТАБЛИЦА для найденного контента
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS found_content (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT,
+                    content TEXT,
+                    category VARCHAR(50),
+                    source VARCHAR(100),
+                    url TEXT,
+                    image_url TEXT,
+                    is_approved BOOLEAN DEFAULT FALSE,
+                    is_published BOOLEAN DEFAULT FALSE,
+                    found_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
             conn.commit()
             logger.info("✅ PostgreSQL database initialized")
         except Exception as e:
@@ -124,6 +143,37 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Error marking post: {e}")
 
+    # НОВЫЙ МЕТОД - добавляем его
+    def add_found_content(self, content_data):
+        """Сохраняет найденный контент в базу"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO found_content (title, content, category, source, url)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            ''', (
+                content_data['title'], 
+                content_data['summary'], 
+                content_data['category'], 
+                content_data['source'], 
+                content_data['url']
+            ))
+            
+            conn.commit()
+            content_id = cursor.fetchone()[0]
+            logger.info(f"✅ Сохранен найденный контент ID: {content_id}")
+            return content_id
+            
+        except Exception as e:
+            logger.error(f"❌ Error saving found content: {e}")
+            raise
+
+# Инициализация БД
+db = DatabaseManager()
+
 # В класс DatabaseManager добавляем:
 def add_found_content(self, content_data):
     """Сохраняет найденный контент в базу"""
@@ -165,7 +215,6 @@ def add_found_content(self, content_data):
         raise
 
 # Добавляем команду для ручного поиска контента
-@bot.message_handler(commands=['find_content'])
 @bot.message_handler(commands=['find_content'])
 def find_content_command(message):
     """Ручной поиск контента"""
@@ -520,6 +569,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
