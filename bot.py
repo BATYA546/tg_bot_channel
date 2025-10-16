@@ -97,42 +97,41 @@ def welcome_new_member(message):
 
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
-    """Показывает статистику канала (только для админа)"""
+    """Показывает статистику канала"""
     if str(message.from_user.id) != ADMIN_ID:
         bot.reply_to(message, "⛔ Нет прав!")
         return
 
     try:
         chat_info = bot.get_chat(CHANNEL_ID)
+        current_time = get_current_time()
+        
+        # Получаем количество постов из базы
+        conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM scheduled_posts WHERE is_published = TRUE')
+        published_count = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM scheduled_posts WHERE is_published = FALSE')
+        pending_count = cursor.fetchone()[0]
+        conn.close()
+        
         stats_text = f"""
 📊 *Статистика канала:*
 
-👥 Участников: `{chat_info.members_count}`
-🏷️ Название: `{chat_info.title}`
-📝 Описание: `{chat_info.description or 'Нет описания'}`
+🏷️ *Название:* {chat_info.title}
+👥 *Участники:* {getattr(chat_info, 'members_count', 'N/A')}
+📅 *Создан:* {chat_info.date.strftime('%d.%m.%Y')}
+
+📈 *Публикации:*
+✅ Опубликовано: {published_count}
+⏳ Ожидает: {pending_count}
+⏰ Время: {current_time.strftime('%H:%M')}
         """
         
         bot.reply_to(message, stats_text, parse_mode='Markdown')
         
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка получения статистики: {e}")
-
-@bot.message_handler(commands=['rules'])
-def rules_command(message):
-    """Показывает правила канала"""
-    rules_text = """
-📋 *Правила нашего канала:*
-
-1. 🤝 Уважайте других участников
-2. 📢 Только релевантные обсуждения  
-3. 🚫 Запрещен спам и реклама
-4. 💡 Делитесь интересными находками
-5. 🌟 Наслаждайтесь контентом!
-
-*Наша миссия:* делиться самым первым и важным!
-    """
-    
-    bot.reply_to(message, rules_text, parse_mode='Markdown')
+        bot.reply_to(message, f"❌ Ошибка статистики: {e}")
 
 class DatabaseManager:
     def __init__(self):
@@ -303,28 +302,76 @@ def safe_polling():
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    """Команда start для админа"""
+    """Универсальная команда start"""
+    if str(message.from_user.id) == ADMIN_ID:
+        # Админ
+        current_time = get_current_time()
+        response = (
+            f"🤖 *Бот управления каналом*\n"
+            f"⏰ Время: {current_time.strftime('%d.%m.%Y %H:%M')}\n\n"
+            "⚙️ *Команды:*\n"
+            "• /post_now текст - опубликовать\n"
+            "• /schedule \"текст\" дата время - запланировать\n"  
+            "• /list_posts - список запланированных\n"
+            "• /debug_posts - отладка\n"
+            "• /setup_welcome - приветствие\n"
+            "• /stats - статистика\n\n"
+            "📝 *Примеры:*\n"
+            "/post_now Привет мир!\n"
+            '/schedule "**Важно**" 2024-01-15 15:30'
+        )
+    else:
+        # Обычный пользователь
+        response = (
+            "👋 *Добро пожаловать!*\n\n"
+            "🏆 Я - бот канала *\"Самое Первое\"*\n\n"
+            "📌 Мы публикуем:\n"
+            "• Первые открытия и изобретения\n"  
+            "• Мировые рекорды\n"
+            "• Революционные технологии\n"
+            "• Уникальные события\n\n"
+            "🔗 *Подпишитесь на канал:*\n"
+            "Ищите `Самое Первое` в Telegram\n\n"
+            "*Будьте в курсе самого важного!* ✨"
+        )
+
+@bot.message_handler(commands=['setup_welcome'])
+def setup_welcome_command(message):
+    """Создает приветственное сообщение в канале"""
     if str(message.from_user.id) != ADMIN_ID:
-        # Для не-админов показываем приветствие
-        start_private_command(message)
+        bot.reply_to(message, "⛔ Нет прав!")
         return
+
+    try:
+        welcome_text = """
+🏆 *Добро пожаловать в "САМОЕ ПЕРВОЕ"!* 
+
+✨ *Что вас ждет:*
+• Первые в мире открытия
+• Мировые рекорды Гиннесса  
+• Революционные технологии
+• Исторические "впервые"
+
+📱 *Совет:* Включите уведомления!
+
+*Приятного просмотра!* 🚀
+        """
+        
+        sent_message = bot.send_message(
+            CHANNEL_ID,
+            welcome_text,
+            parse_mode='Markdown'
+        )
+        
+        bot.reply_to(message, "✅ Приветственное сообщение создано в канале!")
+            
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+
+
     
-    current_time = get_current_time()
-    
-    bot.reply_to(message,
-        f"🤖 Бот для управления каналом запущен!\n"
-        f"⏰ Текущее время: {current_time.strftime('%d.%m.%Y %H:%M')}\n\n"
-        "⚙️ *Команды админа:*\n"
-        "/post_now - опубликовать пост\n"  
-        "/schedule - запланировать пост\n"
-        "/list_posts - список постов\n"
-        "/setup_welcome - создать приветствие\n"
-        "/stats - статистика\n\n"
-        "👋 *Для участников:*\n"
-        "Отправьте /start в ЛС бота\n\n"
-        "📝 *Пример:*\n"
-        '/schedule "**Важное** сообщение" 2024-01-15 15:30'
-    , parse_mode='Markdown')
+    bot.reply_to(message, response, parse_mode='Markdown')
 
 @bot.message_handler(commands=['post_now'])
 def post_now_command(message):
@@ -572,6 +619,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
