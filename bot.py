@@ -74,17 +74,70 @@ class DatabaseManager:
     
     def get_pending_posts(self):
         """Получает неопубликованные посты"""
+        try:
+            conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, message_text, scheduled_time 
+                FROM scheduled_posts 
+                WHERE is_published = FALSE
+                ORDER BY scheduled_time
+            ''')
+            posts = cursor.fetchall()
+            conn.close()
+        
+            # ВОТ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: не фильтруем по времени здесь
+            # Фильтрацию делаем в publish_scheduled_posts
+            return posts
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения постов: {e}")
+            return []
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения постов: {e}")
+            return []
+
+    @bot.message_handler(commands=['debug_posts'])
+ def debug_posts_command(message):
+    """Отладочная информация о постах"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+
+    try:
         conn = sqlite3.connect('posts.db', detect_types=sqlite3.PARSE_DECLTYPES)
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT id, message_text, scheduled_time 
+            SELECT id, message_text, scheduled_time, is_published, created_at
             FROM scheduled_posts 
-            WHERE is_published = FALSE
             ORDER BY scheduled_time
         ''')
-        posts = cursor.fetchall()
+        all_posts = cursor.fetchall()
         conn.close()
-        return posts
+        
+        now = datetime.now()
+        response = f"🐛 ОТЛАДКА ПОСТОВ (всего: {len(all_posts)})\n"
+        response += f"⏰ Текущее время: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        
+        for post in all_posts:
+            post_id, text, post_time, is_published, created_at = post
+            time_str = post_time.strftime('%Y-%m-%d %H:%M:%S')
+            time_left = (post_time - now).total_seconds()
+            
+            status = "✅ ОПУБЛИКОВАН" if is_published else f"⏳ Ожидает ({int(time_left)} сек)"
+            response += f"🆔 {post_id} | {status}\n"
+            response += f"📅 {time_str}\n"
+            response += f"📝 {text[:30]}...\n"
+            response += "─" * 40 + "\n"
+        
+        # Принудительно запускаем проверку
+        publish_scheduled_posts()
+        
+        bot.reply_to(message, response)
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка отладки: {e}")
     
     def mark_as_published(self, post_id):
         """Отмечает пост как опубликованный"""
@@ -107,17 +160,23 @@ def publish_scheduled_posts():
         posts = db.get_pending_posts()
         now = datetime.now()
         
+        logger.info(f"🔍 Проверка постов... Найдено: {len(posts)}")
+        
         published_count = 0
         for post in posts:
             post_id, message_text, scheduled_time = post
             
+            time_left = (scheduled_time - now).total_seconds()
+            logger.info(f"📋 Пост {post_id}: запланирован на {scheduled_time}, осталось {time_left:.0f} сек")
+            
             # Публикуем если время наступило ИЛИ прошло
-            if scheduled_time <= now:
+            if time_left <= 0:
                 try:
+                    logger.info(f"🚀 Публикую пост {post_id}: {message_text[:50]}...")
                     bot.send_message(CHANNEL_ID, message_text)
                     db.mark_as_published(post_id)
                     published_count += 1
-                    logger.info(f"✅ Опубликован запланированный пост ID: {post_id}")
+                    logger.info(f"✅ Успешно опубликован пост ID: {post_id}")
                     
                     # Пауза между публикациями
                     time.sleep(1)
@@ -127,6 +186,8 @@ def publish_scheduled_posts():
         
         if published_count > 0:
             logger.info(f"📤 Опубликовано {published_count} постов")
+        else:
+            logger.info("⏳ Нет постов для публикации")
                 
     except Exception as e:
         logger.error(f"❌ Ошибка в publish_scheduled_posts: {e}")
@@ -192,6 +253,7 @@ def schedule_command(message):
         return
 
     full_text = message.text.strip()
+    logger.info(f"📨 Получена команда: {full_text}")
     
     if len(full_text) <= len('/schedule'):
         bot.reply_to(message, 
@@ -235,8 +297,12 @@ def schedule_command(message):
         time_str = datetime_parts[1]
 
         scheduled_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        now = datetime.now()
         
-        if scheduled_time <= datetime.now():
+        time_diff = (scheduled_time - now).total_seconds()
+        logger.info(f"⏰ Запланировано на: {scheduled_time}, через {time_diff:.0f} сек")
+        
+        if time_diff <= 0:
             bot.reply_to(message, "❌ Укажите будущее время!")
             return
 
@@ -246,16 +312,14 @@ def schedule_command(message):
             f"✅ Пост запланирован!\n"
             f"🆔 ID: {post_id}\n"
             f"📅 Когда: {scheduled_time.strftime('%d.%m.%Y в %H:%M')}\n"
-            f"📝 Текст: {message_text[:80]}..."
+            f"📝 Текст: {message_text[:80]}...\n\n"
+            f"Используйте /debug_posts для отладки"
         )
-        logger.info(f"Запланирован пост ID: {post_id} на {scheduled_time}")
+        logger.info(f"📅 Запланирован пост ID: {post_id} на {scheduled_time}")
         
     except ValueError as e:
-        bot.reply_to(message, 
-            f"❌ Неверный формат даты или времени!\n"
-            f"Используйте: ГГГГ-ММ-ДД ЧЧ:ММ\n"
-            f"Пример: 2024-01-15 15:30"
-        )
+        error_msg = f"❌ Неверный формат даты или времени!\nИспользуйте: ГГГГ-ММ-ДД ЧЧ:ММ\nПример: 2024-01-15 15:30"
+        bot.reply_to(message, error_msg)
         logger.error(f"Ошибка формата даты: {e}")
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
@@ -327,3 +391,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
