@@ -164,19 +164,19 @@ class ContentFinder:
                 facts.append(fact_template.format(impact=random.choice(impacts)))
         
         # Формируем ПОЛНЫЙ текст поста в стиле ВК
-        post_text = f"{emoji} {title}\n\n"
+        full_post_text = f"{emoji} {title}\n\n"
         for fact in facts:
-            post_text += f"• {fact}\n"
+            full_post_text += f"• {fact}\n"
         
         # Добавляем хештеги
         hashtags = ["#первый", "#история", "#рекорд", f"#{subject}"]
         random.shuffle(hashtags)
-        post_text += f"\n{' '.join(hashtags[:3])}"
+        full_post_text += f"\n{' '.join(hashtags[:3])}"
 
-        # ВОЗВРАЩАЕМ ПОЛНЫЙ ТЕКСТ КАК summary
+        # ВОЗВРАЩАЕМ ПОЛНЫЙ ТЕКСТ И В title И В summary
         return {
             'title': title,
-            'summary': post_text,  # Теперь здесь полный текст поста
+            'summary': full_post_text,  # ЗДЕСЬ ПОЛНЫЙ ТЕКСТ
             'category': 'history',
             'url': '',
             'found_date': datetime.now()
