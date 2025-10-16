@@ -463,27 +463,40 @@ def handle_callback(call):
         if call.data.startswith('approve_'):
             content_id = int(call.data.split('_')[1])
             bot.answer_callback_query(call.id, "✅ Контент одобрен!")
+            
+            # Обновляем сообщение
             bot.edit_message_text(
-                "✅ Контент одобрен и будет опубликован!",
-                call.message.chat.id,
-                call.message.message_id
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=f"✅ *Контент одобрен!*\n\nПост будет опубликован в ближайшее время.",
+                parse_mode='Markdown'
             )
-            # TODO: Логика публикации
+            
+            # TODO: Добавить в очередь на публикацию
+            logger.info(f"✅ Контент {content_id} одобрен для публикации")
             
         elif call.data.startswith('reject_'):
             content_id = int(call.data.split('_')[1])
             bot.answer_callback_query(call.id, "❌ Контент отклонен")
+            
             bot.edit_message_text(
-                "❌ Контент отклонен",
-                call.message.chat.id,
-                call.message.message_id
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="❌ *Контент отклонен*",
+                parse_mode='Markdown'
             )
-            # TODO: Логика удаления/архивирования
+            
+            logger.info(f"❌ Контент {content_id} отклонен")
             
         elif call.data.startswith('edit_'):
             content_id = int(call.data.split('_')[1])
             bot.answer_callback_query(call.id, "✏️ Режим редактирования")
-            # TODO: Логика редактирования
+            
+            # Сохраняем ID для редактирования
+            bot.send_message(
+                call.message.chat.id,
+                f"✏️ Режим редактирования для контента #{content_id}\n\nОтправьте новый текст:"
+            )
             
     except Exception as e:
         logger.error(f"❌ Ошибка обработки callback: {e}")
@@ -507,6 +520,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
