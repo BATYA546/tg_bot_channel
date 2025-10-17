@@ -54,8 +54,8 @@ def download_image(image_url):
             
         logger.info(f"📥 Загружаю изображение: {image_url}")
         
-        # Для Wikimedia используем специальный подход
-        if 'wikimedia.org' in image_url or 'wikipedia.org' in image_url:
+        # Если это просто имя файла (наш новый формат)
+        if not image_url.startswith('http'):
             return download_wikimedia_image(image_url)
         
         # Для других сайтов используем стандартный подход
@@ -840,6 +840,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
