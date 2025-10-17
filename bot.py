@@ -95,7 +95,39 @@ def handle_callback(call):
             )
             
         elif call.data.startswith('edit_'):
-            # ... существующий код редактирования ...
+            content_id = int(call.data.split('_')[1])
+            bot.answer_callback_query(call.id, "✏️ Загружаем полный текст...")
+            
+            # Получаем полный текст из базы
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT content FROM found_content WHERE id = %s', (content_id,))
+            result = cursor.fetchone()
+            
+            if result:
+                full_post_text = result[0]
+                
+                # Сохраняем в памяти для редактирования
+                editing_posts[call.message.chat.id] = content_id
+                
+                # Показываем полный текст для редактирования
+                edit_message = f"""✏️ РЕДАКТИРОВАНИЕ ПОСТА #{content_id}
+
+Текущий текст:
+{full_post_text}
+
+📝 Отправьте исправленный текст:"""
+                
+                bot.edit_message_text(
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                    text="✏️ Режим редактирования"
+                )
+                
+                bot.send_message(
+                    call.message.chat.id,
+                    edit_message
+                )
             
     except Exception as e:
         logger.error(f"❌ Ошибка обработки callback: {e}")
