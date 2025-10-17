@@ -161,8 +161,12 @@ class DatabaseManager:
                 )
             ''')
             
+            # Добавляем индексы для ускорения поиска дубликатов
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_found_content_title ON found_content(title)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_found_content_found_at ON found_content(found_at)')
+            
             conn.commit()
-            logger.info("✅ PostgreSQL database initialized")
+            logger.info("✅ PostgreSQL database initialized with indexes")
         except Exception as e:
             logger.error(f"❌ Database init error: {e}")
 
@@ -256,6 +260,46 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Error getting found content: {e}")
             return None
+
+    def is_content_exists(self, title, content):
+        """Проверяет, существует ли уже такой контент в базе"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            # Ищем похожие посты по заголовку и содержанию
+            cursor.execute('''
+                SELECT id FROM found_content 
+                WHERE title = %s OR content LIKE %s
+            ''', (title, f"%{title[:50]}%"))
+            
+            result = cursor.fetchone()
+            return result is not None
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking content existence: {e}")
+            return False
+
+    def get_all_content_hashes(self):
+        """Возвращает все существующие хеши контента из БД"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT title, content FROM found_content')
+            existing_posts = cursor.fetchall()
+            
+            hashes = set()
+            for title, content in existing_posts:
+                text = title + content
+                content_hash = hashlib.md5(text.encode()).hexdigest()
+                hashes.add(content_hash)
+                
+            logger.info(f"✅ Загружено {len(hashes)} существующих хешей из БД")
+            return hashes
+            
+        except Exception as e:
+            logger.error(f"❌ Error loading content hashes: {e}")
+            return set()
 
 # Инициализация БД
 db = DatabaseManager()
@@ -353,33 +397,44 @@ def auto_content_scheduler():
         try:
             if CONTENT_FINDER_AVAILABLE and bot_running:
                 logger.info("🔄 Автоматический поиск контента...")
-                finder = setup_content_finder()
-                found_content = finder.search_content(max_posts=3)  # 3 поста в день
+                
+                # Создаем ContentFinder с передачей db_manager
+                finder = setup_content_finder(db)
+                found_content = finder.search_content(max_posts=3)
                 
                 if found_content:
+                    new_posts_count = 0
                     for content in found_content:
-                        content_id = db.add_found_content(content)
-                        
-                        # Форматируем превью
-                        preview = finder.format_for_preview(content)
-                        
-                        # Создаем клавиатуру для модерации
-                        markup = telebot.types.InlineKeyboardMarkup()
-                        markup.row(
-                            telebot.types.InlineKeyboardButton("✅ Опубликовать", callback_data=f"approve_{content_id}"),
-                            telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
-                            telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
-                        )
-                        
-                        # Отправляем админу на одобрение
-                        bot.send_message(
-                            ADMIN_ID,
-                            preview,
-                            reply_markup=markup
-                        )
-                        time.sleep(2)
+                        # Дополнительная проверка перед сохранением
+                        if not db.is_content_exists(content['title'], content['summary']):
+                            content_id = db.add_found_content(content)
+                            new_posts_count += 1
+                            
+                            # Форматируем превью
+                            preview = finder.format_for_preview(content)
+                            
+                            # Создаем клавиатуру для модерации
+                            markup = telebot.types.InlineKeyboardMarkup()
+                            markup.row(
+                                telebot.types.InlineKeyboardButton("✅ Опубликовать", callback_data=f"approve_{content_id}"),
+                                telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
+                                telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
+                            )
+                            
+                            # Отправляем админу на одобрение
+                            bot.send_message(
+                                ADMIN_ID,
+                                preview,
+                                reply_markup=markup
+                            )
+                            time.sleep(2)
+                        else:
+                            logger.info(f"🚫 Пропускаем дубликат: {content['title'][:30]}...")
                     
-                    logger.info(f"✅ Отправлено {len(found_content)} постов на модерацию")
+                    if new_posts_count > 0:
+                        logger.info(f"✅ Отправлено {new_posts_count} новых постов на модерацию")
+                    else:
+                        logger.info("ℹ️ Новых постов не найдено")
                         
         except Exception as e:
             logger.error(f"❌ Ошибка автоматического поиска: {e}")
@@ -590,6 +645,9 @@ def stats_command(message):
         cursor.execute('SELECT COUNT(*) FROM found_content WHERE is_published = TRUE')
         auto_published_count = cursor.fetchone()[0]
         
+        cursor.execute('SELECT COUNT(*) FROM found_content')
+        total_found_count = cursor.fetchone()[0]
+        
         stats_text = f"""
 📊 Статистика бота:
 
@@ -598,6 +656,10 @@ def stats_command(message):
 ✅ Опубликовано вручную: {published_count}
 🤖 Опубликовано авто: {auto_published_count}
 ⏳ В ожидании: {pending_count}
+
+📋 Найденный контент:
+📥 Всего найдено: {total_found_count}
+✅ Опубликовано: {auto_published_count}
 
 ⏰ Время: {current_time.strftime('%H:%M %d.%m.%Y')}
 
@@ -622,33 +684,43 @@ def find_content_command(message):
     try:
         bot.reply_to(message, "🔍 Начинаю поиск контента...")
         
-        finder = setup_content_finder()
+        # Передаем db_manager в content_finder для проверки дубликатов
+        finder = setup_content_finder(db)
         found_content = finder.search_content(max_posts=2)
         
         if found_content:
+            new_posts_count = 0
             for content in found_content:
-                content_id = db.add_found_content(content)
-                
-                # Форматируем превью
-                preview = finder.format_for_preview(content)
-                
-                # Создаем клавиатуру
-                markup = telebot.types.InlineKeyboardMarkup()
-                markup.row(
-                    telebot.types.InlineKeyboardButton("✅ Опубликовать", callback_data=f"approve_{content_id}"),
-                    telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
-                    telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
-                )
-                
-                # Отправляем сообщение с кнопками
-                bot.send_message(
-                    message.chat.id, 
-                    preview, 
-                    reply_markup=markup
-                )
-                time.sleep(1)
+                # Дополнительная проверка перед сохранением
+                if not db.is_content_exists(content['title'], content['summary']):
+                    content_id = db.add_found_content(content)
+                    new_posts_count += 1
+                    
+                    # Форматируем превью
+                    preview = finder.format_for_preview(content)
+                    
+                    # Создаем клавиатуру
+                    markup = telebot.types.InlineKeyboardMarkup()
+                    markup.row(
+                        telebot.types.InlineKeyboardButton("✅ Опубликовать", callback_data=f"approve_{content_id}"),
+                        telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
+                        telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
+                    )
+                    
+                    # Отправляем сообщение с кнопками
+                    bot.send_message(
+                        message.chat.id, 
+                        preview, 
+                        reply_markup=markup
+                    )
+                    time.sleep(1)
+                else:
+                    logger.info(f"🚫 Пропускаем дубликат: {content['title'][:30]}...")
             
-            bot.reply_to(message, f"✅ Найдено {len(found_content)} материалов. Проверьте предложения выше!")
+            if new_posts_count > 0:
+                bot.reply_to(message, f"✅ Найдено {new_posts_count} новых материалов. Проверьте предложения выше!")
+            else:
+                bot.reply_to(message, "❌ Новых материалов не найдено, все уже есть в базе.")
         else:
             bot.reply_to(message, "❌ Не найдено подходящего контента.")
             
