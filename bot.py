@@ -45,28 +45,378 @@ except ImportError as e:
     logger.warning(f"❌ ContentFinder не доступен: {e}")
     CONTENT_FINDER_AVAILABLE = False
 
-# ... (все функции остаются здесь: get_current_time, download_image, send_post_with_image, etc.)
-# ... (DatabaseManager класс и все остальные функции)
+def get_current_time():
+    """Возвращает текущее время с правильным часовым поясом"""
+    return datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_OFFSET)
+
+def download_image(image_url):
+    """Скачивает изображение по URL"""
+    try:
+        if not image_url:
+            return None
+            
+        logger.info(f"📥 Загружаю изображение: {image_url}")
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8'
+        }
+        
+        response = requests.get(image_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            # Проверяем что это изображение по content-type
+            content_type = response.headers.get('content-type', '')
+            if 'image' in content_type:
+                logger.info(f"✅ Изображение загружено: {len(response.content)} байт")
+                return response.content
+            else:
+                logger.error(f"❌ Не изображение: {content_type}")
+                return None
+        else:
+            logger.error(f"❌ Ошибка HTTP {response.status_code}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки изображения: {e}")
+        return None
+
+def send_post_with_image(chat_id, text, image_data=None):
+    """Отправляет пост с изображением"""
+    try:
+        if image_data:
+            # Отправляем фото с подписью
+            bot.send_photo(chat_id, image_data, caption=text)
+            logger.info(f"✅ Пост с изображением отправлен в {chat_id}")
+        else:
+            # Отправляем просто текст
+            bot.send_message(chat_id, text)
+            logger.info(f"✅ Текстовый пост отправлен в {chat_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки поста с изображением: {e}")
+        # Пробуем отправить без изображения
+        try:
+            bot.send_message(chat_id, text)
+            logger.info(f"✅ Пост отправлен без изображения в {chat_id}")
+            return True
+        except Exception as e2:
+            logger.error(f"❌ Критическая ошибка отправки: {e2}")
+            return False
+
+def send_formatted_message(chat_id, text):
+    """Простая отправка сообщений без форматирования"""
+    try:
+        # Просто отправляем как обычный текст
+        bot.send_message(chat_id, text)
+        logger.info(f"✅ Сообщение отправлено в {chat_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки сообщения: {e}")
+        return False
+
+class DatabaseManager:
+    def __init__(self):
+        self.conn = None
+        self.init_db()
+    
+    def get_connection(self):
+        """Создает соединение с PostgreSQL"""
+        if self.conn is None or self.conn.closed:
+            if DATABASE_URL:
+                self.conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+            else:
+                logger.error("DATABASE_URL not found")
+                raise Exception("Database connection failed")
+        return self.conn
+    
+    def init_db(self):
+        """Инициализация базы данных"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            # Таблица для запланированных постов
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS scheduled_posts (
+                    id SERIAL PRIMARY KEY,
+                    message_text TEXT,
+                    scheduled_time TIMESTAMP,
+                    is_published BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Таблица для найденного контента
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS found_content (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT,
+                    content TEXT,
+                    category VARCHAR(50),
+                    url TEXT,
+                    image_url TEXT,
+                    is_approved BOOLEAN DEFAULT FALSE,
+                    is_published BOOLEAN DEFAULT FALSE,
+                    found_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            conn.commit()
+            logger.info("✅ PostgreSQL database initialized")
+        except Exception as e:
+            logger.error(f"❌ Database init error: {e}")
+
+    def save_scheduled_post(self, message_text, scheduled_time):
+        """Сохраняет пост в базу данных"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO scheduled_posts (message_text, scheduled_time)
+                VALUES (%s, %s)
+                RETURNING id
+            ''', (message_text, scheduled_time))
+            conn.commit()
+            post_id = cursor.fetchone()[0]
+            return post_id
+        except Exception as e:
+            logger.error(f"❌ Error saving post: {e}")
+            raise
+    
+    def get_pending_posts(self):
+        """Получает неопубликованные посты"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, message_text, scheduled_time 
+                FROM scheduled_posts 
+                WHERE is_published = FALSE
+                ORDER BY scheduled_time
+            ''')
+            posts = cursor.fetchall()
+            return posts
+        except Exception as e:
+            logger.error(f"❌ Error getting posts: {e}")
+            return []
+    
+    def mark_as_published(self, post_id):
+        """Отмечает пост как опубликованный"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE scheduled_posts 
+                SET is_published = TRUE 
+                WHERE id = %s
+            ''', (post_id,))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"❌ Error marking post: {e}")
+
+    def add_found_content(self, content_data):
+        """Сохраняет найденный контент в базу"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO found_content (title, content, category, url, image_url)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            ''', (
+                content_data['title'], 
+                content_data['summary'], 
+                content_data['category'], 
+                content_data.get('url', ''),
+                content_data.get('image_url', '')
+            ))
+            
+            conn.commit()
+            content_id = cursor.fetchone()[0]
+            logger.info(f"✅ Сохранен найденный контент ID: {content_id}")
+            return content_id
+            
+        except Exception as e:
+            logger.error(f"❌ Error saving found content: {e}")
+            raise
+
+    def get_found_content(self, content_id):
+        """Получает найденный контент по ID"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, title, content, category, is_approved, is_published, image_url
+                FROM found_content 
+                WHERE id = %s
+            ''', (content_id,))
+            result = cursor.fetchone()
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error getting found content: {e}")
+            return None
+
+# Инициализация БД
+db = DatabaseManager()
 
 # Словарь для хранения редактируемых постов
 editing_posts = {}
 
-def main():
-    """Запуск бота"""
+def publish_approved_post(content_id):
+    """Публикует одобренный пост в канал"""
+    try:
+        # Получаем контент из базы
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT content, image_url FROM found_content WHERE id = %s', (content_id,))
+        result = cursor.fetchone()
+        
+        if result:
+            full_post_text, image_url = result
+            logger.info(f"📤 Публикую пост {content_id}")
+            logger.info(f"🖼️ URL изображения: {image_url}")
+            
+            # Скачиваем изображение если есть
+            image_data = None
+            if image_url and image_url.startswith('http'):
+                image_data = download_image(image_url)
+                if image_data:
+                    logger.info(f"✅ Изображение загружено для поста {content_id}")
+                else:
+                    logger.warning(f"⚠️ Не удалось загрузить изображение для поста {content_id}")
+            else:
+                logger.warning(f"⚠️ Некорректный URL изображения: {image_url}")
+            
+            # Публикуем в канал
+            success = send_post_with_image(CHANNEL_ID, full_post_text, image_data)
+            
+            if success:
+                # Отмечаем как опубликованный
+                cursor.execute('UPDATE found_content SET is_published = TRUE WHERE id = %s', (content_id,))
+                conn.commit()
+                logger.info(f"✅ Пост {content_id} опубликован в канале")
+                return True
+            else:
+                logger.error(f"❌ Не удалось опубликовать пост {content_id}")
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка публикации поста {content_id}: {e}")
+        return False
+
+def publish_scheduled_posts():
+    """Публикует запланированные посты"""
+    try:
+        posts = db.get_pending_posts()
+        now = get_current_time()
+        
+        published_count = 0
+        for post in posts:
+            post_id, message_text, scheduled_time = post
+            time_left = (scheduled_time - now).total_seconds()
+            
+            if time_left <= 0:
+                try:
+                    success = send_formatted_message(CHANNEL_ID, message_text)
+                    if success:
+                        db.mark_as_published(post_id)
+                        published_count += 1
+                        logger.info(f"✅ Опубликован пост ID: {post_id}")
+                    time.sleep(1)
+                except Exception as e:
+                    logger.error(f"❌ Ошибка публикации: {e}")
+        
+        if published_count > 0:
+            logger.info(f"📤 Опубликовано постов: {published_count}")
+                
+    except Exception as e:
+        logger.error(f"❌ Ошибка в планировщике: {e}")
+
+def post_scheduler():
+    """Планировщик постов"""
+    logger.info("🕒 Запущен планировщик постов")
+    while bot_running:
+        try:
+            publish_scheduled_posts()
+            time.sleep(30)
+        except Exception as e:
+            logger.error(f"💥 Ошибка планировщика: {e}")
+            time.sleep(30)
+
+def auto_content_scheduler():
+    """Автоматический поиск контента (без авто-публикации)"""
+    logger.info("⏰ Запущен автоматический поиск контента")
+    
+    def job():
+        try:
+            if CONTENT_FINDER_AVAILABLE and bot_running:
+                logger.info("🔄 Автоматический поиск контента...")
+                finder = setup_content_finder()
+                found_content = finder.search_content(max_posts=3)  # 3 поста в день
+                
+                if found_content:
+                    for content in found_content:
+                        content_id = db.add_found_content(content)
+                        
+                        # Форматируем превью
+                        preview = finder.format_for_preview(content)
+                        
+                        # Создаем клавиатуру для модерации
+                        markup = telebot.types.InlineKeyboardMarkup()
+                        markup.row(
+                            telebot.types.InlineKeyboardButton("✅ Опубликовать", callback_data=f"approve_{content_id}"),
+                            telebot.types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{content_id}"),
+                            telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{content_id}")
+                        )
+                        
+                        # Отправляем админу на одобрение
+                        bot.send_message(
+                            ADMIN_ID,
+                            preview,
+                            reply_markup=markup
+                        )
+                        time.sleep(2)
+                    
+                    logger.info(f"✅ Отправлено {len(found_content)} постов на модерацию")
+                        
+        except Exception as e:
+            logger.error(f"❌ Ошибка автоматического поиска: {e}")
+    
+    # Запускаем 2 раза в день (утром и вечером)
+    while bot_running:
+        job()
+        time.sleep(43200)  # 12 часов
+
+def start_scheduler():
+    """Запускает все планировщики"""
+    # Запускаем планировщик постов
+    post_scheduler_thread = threading.Thread(target=post_scheduler, daemon=True)
+    post_scheduler_thread.start()
+    
+    # Запускаем автопланировщик контента
+    auto_scheduler_thread = threading.Thread(target=auto_content_scheduler, daemon=True)
+    auto_scheduler_thread.start()
+    
+    logger.info("✅ Все планировщики запущены")
+
+def safe_polling():
+    """Безопасный запуск бота"""
     global bot_running
-    
-    logger.info("🚀 Запуск бота...")
-    
-    if not all([BOT_TOKEN, CHANNEL_ID, ADMIN_ID]):
-        logger.error("❌ Не все переменные окружения установлены!")
-        return
-    
-    # Запускаем все планировщики
-    start_scheduler()
-    
-    # Запускаем бота
-    logger.info("✅ Бот готов к работе!")
-    safe_polling()
+    while bot_running:
+        try:
+            logger.info("🔄 Запуск бота...")
+            bot.polling(none_stop=True, interval=1, timeout=60)
+        except Exception as e:
+            if not bot_running:
+                break
+            if "409" in str(e):
+                logger.warning("⚠️ Конфликт - жду 10 секунд")
+                time.sleep(10)
+            else:
+                logger.error(f"❌ Ошибка: {e}")
+                time.sleep(30)
 
 # ВСЕ ОБРАБОТЧИКИ ДОЛЖНЫ БЫТЬ ПОСЛЕ ОПРЕДЕЛЕНИЯ ВСЕХ ФУНКЦИЙ:
 
@@ -481,6 +831,23 @@ def handle_edit_text(message):
     except Exception as e:
         logger.error(f"❌ Ошибка редактирования: {e}")
         bot.reply_to(message, f"❌ Ошибка при сохранении: {e}")
+
+def main():
+    """Запуск бота"""
+    global bot_running
+    
+    logger.info("🚀 Запуск бота...")
+    
+    if not all([BOT_TOKEN, CHANNEL_ID, ADMIN_ID]):
+        logger.error("❌ Не все переменные окружения установлены!")
+        return
+    
+    # Запускаем все планировщики
+    start_scheduler()
+    
+    # Запускаем бота
+    logger.info("✅ Бот готов к работе!")
+    safe_polling()
 
 if __name__ == '__main__':
     main()
