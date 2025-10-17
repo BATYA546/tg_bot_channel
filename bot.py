@@ -54,24 +54,26 @@ def download_image(image_url):
             
         logger.info(f"📥 Загружаю изображение: {image_url}")
         
-        # Если это просто имя файла (наш новый формат)
-        if not image_url.startswith('http'):
-            return download_wikimedia_image(image_url)
-        
-        # Для других сайтов используем стандартный подход
+        # Простые заголовки для всех запросов
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Referer': 'https://commons.wikimedia.org/'
         }
         
         response = requests.get(image_url, headers=headers, timeout=15)
         if response.status_code == 200:
-            image = Image.open(io.BytesIO(response.content))
-            logger.info(f"✅ Изображение загружено: {image.size[0]}x{image.size[1]}")
-            return response.content
+            # Проверяем что это действительно изображение
+            try:
+                image = Image.open(io.BytesIO(response.content))
+                logger.info(f"✅ Изображение загружено: {image.size[0]}x{image.size[1]}, размер: {len(response.content)} байт")
+                return response.content
+            except Exception as img_error:
+                logger.error(f"❌ Ошибка обработки изображения: {img_error}")
+                return None
         else:
-            logger.error(f"❌ Ошибка HTTP {response.status_code}")
+            logger.error(f"❌ Ошибка HTTP {response.status_code} при загрузке изображения")
             return None
             
     except Exception as e:
@@ -840,6 +842,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
