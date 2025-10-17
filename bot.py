@@ -34,6 +34,9 @@ bot = telebot.TeleBot(BOT_TOKEN)
 # Исправление часового пояса (UTC+3 для Москвы)
 TIMEZONE_OFFSET = 3
 
+# Флаг для остановки бота
+bot_running = True
+
 # Импорт content_finder
 try:
     from content_finder import setup_content_finder
@@ -75,47 +78,6 @@ def download_image(image_url):
             
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки изображения: {e}")
-        return None
-
-def download_wikimedia_image(wikimedia_url):
-    """Специальная функция для загрузки изображений с Wikimedia"""
-    try:
-        logger.info(f"🔄 Обрабатываю Wikimedia URL: {wikimedia_url}")
-        
-        # Простой подход - используем известные прямые ссылки
-        # Для теста используем стабильные изображения
-        known_images = {
-            'Sputnik_1.jpg': 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/3c/Sputnik_1.jpg/500px-Sputnik_1.jpg',
-            'Alexander_Graham_Bell.jpg': 'https://upload.wikimedia.org/wikipedia/commons/thumb/1/10/Alexander_Graham_Bell.jpg/500px-Alexander_Graham_Bell.jpg',
-            'First_flight2.jpg': 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/First_flight2.jpg/500px-First_flight2.jpg',
-            'ENIAC_Penn1.jpg': 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6c/ENIAC_Penn1.jpg/500px-ENIAC_Penn1.jpg'
-        }
-        
-        # Ищем известное изображение по имени файла
-        for filename, direct_url in known_images.items():
-            if filename in wikimedia_url:
-                logger.info(f"🔄 Найдено известное изображение: {filename}")
-                
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                    'Referer': 'https://commons.wikimedia.org/'
-                }
-                
-                response = requests.get(direct_url, headers=headers, timeout=15)
-                if response.status_code == 200:
-                    image = Image.open(io.BytesIO(response.content))
-                    logger.info(f"✅ Wikimedia изображение загружено: {image.size[0]}x{image.size[1]}")
-                    return response.content
-                else:
-                    logger.error(f"❌ Ошибка HTTP {response.status_code} для {filename}")
-                    return None
-        
-        logger.error(f"❌ Неизвестное Wikimedia изображение: {wikimedia_url}")
-        return None
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка загрузки Wikimedia изображения: {e}")
         return None
 
 def send_post_with_image(chat_id, text, image_data=None):
@@ -375,7 +337,7 @@ def publish_scheduled_posts():
 def post_scheduler():
     """Планировщик постов"""
     logger.info("🕒 Запущен планировщик постов")
-    while True:
+    while bot_running:
         try:
             publish_scheduled_posts()
             time.sleep(30)
@@ -389,7 +351,7 @@ def auto_content_scheduler():
     
     def job():
         try:
-            if CONTENT_FINDER_AVAILABLE:
+            if CONTENT_FINDER_AVAILABLE and bot_running:
                 logger.info("🔄 Автоматический поиск контента...")
                 finder = setup_content_finder()
                 found_content = finder.search_content(max_posts=1)
@@ -410,7 +372,7 @@ def auto_content_scheduler():
             logger.error(f"❌ Ошибка автоматического планировщика: {e}")
     
     # Запускаем каждые 10 минут для теста
-    while True:
+    while bot_running:
         job()
         time.sleep(600)
 
@@ -428,11 +390,14 @@ def start_scheduler():
 
 def safe_polling():
     """Безопасный запуск бота"""
-    while True:
+    global bot_running
+    while bot_running:
         try:
             logger.info("🔄 Запуск бота...")
             bot.polling(none_stop=True, interval=1, timeout=60)
         except Exception as e:
+            if not bot_running:
+                break
             if "409" in str(e):
                 logger.warning("⚠️ Конфликт - жду 10 секунд")
                 time.sleep(10)
@@ -458,6 +423,7 @@ def start_command(message):
 /find_content - найти контент
 /view_found - просмотреть найденные посты
 /time - проверить время
+/stop - остановить бота
 
 📝 Пример:
 /schedule "Важно сообщение" 2024-01-15 15:30
@@ -477,6 +443,26 @@ def start_command(message):
 💡 Будьте в курсе самого важного!
 """
         bot.reply_to(message, response)
+
+@bot.message_handler(commands=['stop'])
+def stop_command(message):
+    """Остановка бота"""
+    global bot_running
+    
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+    
+    bot_running = False
+    logger.info("🛑 Получена команда остановки бота")
+    bot.reply_to(message, "🛑 Бот останавливается...")
+    
+    # Даем время на отправку ответа
+    time.sleep(2)
+    
+    # Завершаем работу
+    logger.info("✅ Бот остановлен")
+    exit(0)
 
 @bot.message_handler(commands=['time'])
 def time_command(message):
@@ -824,6 +810,8 @@ def handle_edit_text(message):
 
 def main():
     """Запуск бота"""
+    global bot_running
+    
     logger.info("🚀 Запуск бота...")
     
     if not all([BOT_TOKEN, CHANNEL_ID, ADMIN_ID]):
@@ -839,9 +827,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
