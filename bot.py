@@ -307,6 +307,9 @@ db = DatabaseManager()
 # Словарь для хранения редактируемых постов
 editing_posts = {}
 
+# Словарь для хранения состояний пользователей
+user_states = {}
+
 def publish_approved_post(content_id):
     """Публикует одобренный пост в канал"""
     try:
@@ -473,32 +476,61 @@ def safe_polling():
                 logger.error(f"❌ Ошибка: {e}")
                 time.sleep(30)
 
+def show_admin_menu(chat_id):
+    """Показывает меню админа с кнопками"""
+    current_time = get_current_time()
+    
+    menu_text = f"""
+🤖 Бот управления каналом
+
+⏰ Время: {current_time.strftime('%H:%M %d.%m.%Y')}
+
+⚙️ Выберите действие:
+"""
+    
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    
+    # Первый ряд кнопок
+    markup.row(
+        telebot.types.KeyboardButton('📝 Опубликовать пост'),
+        telebot.types.KeyboardButton('⏰ Запланировать пост')
+    )
+    
+    # Второй ряд кнопок
+    markup.row(
+        telebot.types.KeyboardButton('📋 Список постов'),
+        telebot.types.KeyboardButton('📊 Статистика')
+    )
+    
+    # Третий ряд кнопок
+    markup.row(
+        telebot.types.KeyboardButton('🔍 Найти контент'),
+        telebot.types.KeyboardButton('📰 Просмотреть посты')
+    )
+    
+    # Четвертый ряд кнопок
+    markup.row(
+        telebot.types.KeyboardButton('🕒 Проверить время'),
+        telebot.types.KeyboardButton('🛑 Остановить бота')
+    )
+    
+    # Кнопка скрытия клавиатуры
+    markup.row(telebot.types.KeyboardButton('📱 Скрыть меню'))
+    
+    bot.send_message(chat_id, menu_text, reply_markup=markup)
+
+def hide_menu(chat_id):
+    """Скрывает меню"""
+    remove_markup = telebot.types.ReplyKeyboardRemove()
+    bot.send_message(chat_id, "📱 Меню скрыто. Используйте /start для показа меню.", reply_markup=remove_markup)
+
 # ВСЕ ОБРАБОТЧИКИ ДОЛЖНЫ БЫТЬ ПОСЛЕ ОПРЕДЕЛЕНИЯ ВСЕХ ФУНКЦИЙ:
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
     """Команда start"""
     if str(message.from_user.id) == ADMIN_ID:
-        current_time = get_current_time()
-        response = f"""
-🤖 Бот управления каналом
-
-⏰ Время: {current_time.strftime('%H:%M %d.%m.%Y')}
-
-⚙️ Команды:
-/post_now - опубликовать пост
-/schedule - запланировать пост  
-/list_posts - список постов
-/stats - статистика
-/find_content - найти контент
-/view_found - просмотреть найденные посты
-/time - проверить время
-/stop - остановить бота
-
-📝 Пример:
-/schedule "Важно сообщение" 2024-01-15 15:30
-"""
-        bot.reply_to(message, response)
+        show_admin_menu(message.chat.id)
     else:
         response = """
 👋 Привет!
@@ -513,6 +545,154 @@ def start_command(message):
 💡 Будьте в курсе самого важного!
 """
         bot.reply_to(message, response)
+
+@bot.message_handler(func=lambda message: message.text == '📱 Скрыть меню')
+def hide_menu_command(message):
+    """Скрытие меню"""
+    if str(message.from_user.id) == ADMIN_ID:
+        hide_menu(message.chat.id)
+
+@bot.message_handler(func=lambda message: message.text == '📝 Опубликовать пост')
+def post_now_button(message):
+    """Кнопка публикации поста"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+    
+    user_states[message.chat.id] = 'waiting_post_text'
+    bot.send_message(message.chat.id, "📝 Введите текст поста для немедленной публикации:")
+
+@bot.message_handler(func=lambda message: message.text == '⏰ Запланировать пост')
+def schedule_button(message):
+    """Кнопка планирования поста"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+    
+    user_states[message.chat.id] = 'waiting_schedule_text'
+    bot.send_message(message.chat.id, "📅 Введите текст поста для планирования (в следующем сообщении укажите дату и время):")
+
+@bot.message_handler(func=lambda message: message.text == '📋 Список постов')
+def list_posts_button(message):
+    """Кнопка списка постов"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+    
+    list_posts_command(message)
+
+@bot.message_handler(func=lambda message: message.text == '📊 Статистика')
+def stats_button(message):
+    """Кнопка статистики"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+    
+    stats_command(message)
+
+@bot.message_handler(func=lambda message: message.text == '🔍 Найти контент')
+def find_content_button(message):
+    """Кнопка поиска контента"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+    
+    find_content_command(message)
+
+@bot.message_handler(func=lambda message: message.text == '📰 Просмотреть посты')
+def view_found_button(message):
+    """Кнопка просмотра постов"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+    
+    view_found_command(message)
+
+@bot.message_handler(func=lambda message: message.text == '🕒 Проверить время')
+def time_button(message):
+    """Кнопка проверки времени"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+    
+    time_command(message)
+
+@bot.message_handler(func=lambda message: message.text == '🛑 Остановить бота')
+def stop_button(message):
+    """Кнопка остановки бота"""
+    if str(message.from_user.id) != ADMIN_ID:
+        bot.reply_to(message, "⛔ Нет прав!")
+        return
+    
+    stop_command(message)
+
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == 'waiting_post_text')
+def handle_post_text(message):
+    """Обработка текста для немедленной публикации"""
+    try:
+        text = message.text.strip()
+        if not text:
+            bot.reply_to(message, "❌ Текст поста не может быть пустым!")
+            return
+        
+        success = send_formatted_message(CHANNEL_ID, text)
+        if success:
+            bot.reply_to(message, "✅ Пост опубликован!")
+        else:
+            bot.reply_to(message, "❌ Не удалось опубликовать пост")
+        
+        # Сбрасываем состояние
+        user_states.pop(message.chat.id, None)
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+        user_states.pop(message.chat.id, None)
+
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == 'waiting_schedule_text')
+def handle_schedule_text(message):
+    """Обработка текста для планирования"""
+    try:
+        text = message.text.strip()
+        if not text:
+            bot.reply_to(message, "❌ Текст поста не может быть пустым!")
+            return
+        
+        # Сохраняем текст и запрашиваем дату
+        user_states[message.chat.id] = {'state': 'waiting_schedule_time', 'text': text}
+        bot.reply_to(message, "⏰ Теперь введите дату и время в формате: ГГГГ-ММ-ДД ЧЧ:ММ\nНапример: 2024-01-15 15:30")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+        user_states.pop(message.chat.id, None)
+
+@bot.message_handler(func=lambda message: 
+                    user_states.get(message.chat.id) and 
+                    user_states[message.chat.id].get('state') == 'waiting_schedule_time')
+def handle_schedule_time(message):
+    """Обработка времени для планирования"""
+    try:
+        user_data = user_states[message.chat.id]
+        message_text = user_data['text']
+        datetime_str = message.text.strip()
+        
+        scheduled_time = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
+        
+        if scheduled_time <= get_current_time():
+            bot.reply_to(message, "❌ Укажите будущее время!")
+            return
+        
+        post_id = db.save_scheduled_post(message_text, scheduled_time)
+        
+        bot.reply_to(message, f"✅ Пост #{post_id} запланирован на {scheduled_time.strftime('%H:%M %d.%m.%Y')}")
+        
+        # Сбрасываем состояние
+        user_states.pop(message.chat.id, None)
+        
+    except ValueError:
+        bot.reply_to(message, "❌ Неверный формат даты. Используйте: ГГГГ-ММ-ДД ЧЧ:ММ")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+        user_states.pop(message.chat.id, None)
 
 @bot.message_handler(commands=['stop'])
 def stop_command(message):
