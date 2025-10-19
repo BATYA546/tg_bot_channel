@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 import re
 import json
 import time
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 
@@ -15,18 +16,21 @@ class ContentFinder:
     def __init__(self, db_manager=None):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
         
         self.db_manager = db_manager
         self.post_hashes = set()
         self.load_existing_hashes()
         
+        # Более разнообразные источники
         self.sources = [
             self.parse_wikipedia_firsts,
-            self.parse_historical_firsts,
-            self.parse_science_firsts,
-            self.parse_tech_firsts
+            self.parse_historical_events,
+            self.parse_science_discoveries,
+            self.parse_tech_innovations,
+            self.parse_cultural_firsts,
+            self.parse_sports_records
         ]
 
     def load_existing_hashes(self):
@@ -39,7 +43,7 @@ class ContentFinder:
                 existing_posts = cursor.fetchall()
                 
                 for title, content in existing_posts:
-                    text = title + content
+                    text = title + content[:200]  # Берем только начало контента
                     content_hash = hashlib.md5(text.encode()).hexdigest()
                     self.post_hashes.add(content_hash)
                     
@@ -53,21 +57,23 @@ class ContentFinder:
         
         found_content = []
         attempts = 0
-        max_attempts = 8  # Уменьшим количество попыток
+        max_attempts = 10
+        
+        # Перемешиваем источники для разнообразия
+        random.shuffle(self.sources)
         
         while len(found_content) < max_posts and attempts < max_attempts:
             attempts += 1
             logger.info(f"🔍 Попытка {attempts}/{max_attempts}")
-            
-            # Перемешиваем источники для разнообразия
-            random.shuffle(self.sources)
             
             for source in self.sources:
                 try:
                     if len(found_content) >= max_posts:
                         break
                         
+                    logger.info(f"📡 Проверяем источник: {source.__name__}")
                     content_list = source()
+                    
                     if content_list:
                         for content in content_list:
                             if self.is_truly_unique_content(content) and len(found_content) < max_posts:
@@ -78,13 +84,15 @@ class ContentFinder:
                             
                             if len(found_content) >= max_posts:
                                 break
+                    else:
+                        logger.info(f"ℹ️ Источник {source.__name__} не вернул контент")
                 
                 except Exception as e:
                     logger.error(f"❌ Ошибка источника {source.__name__}: {e}")
                     continue
                 
-            # Небольшая задержка между попытками
-            time.sleep(1)
+            # Увеличиваем задержку между попытками
+            time.sleep(2)
         
         logger.info(f"🎯 Найдено уникальных материалов: {len(found_content)}")
         return found_content
@@ -112,10 +120,11 @@ class ContentFinder:
             cursor = conn.cursor()
             
             # Более гибкая проверка - ищем похожие заголовки
+            search_term = content['title'][:40]
             cursor.execute('''
                 SELECT id FROM found_content 
                 WHERE title LIKE %s OR content LIKE %s
-            ''', (f"%{content['title'][:30]}%", f"%{content['title'][:20]}%"))
+            ''', (f"%{search_term}%", f"%{search_term}%"))
             
             result = cursor.fetchone()
             return result is not None
@@ -126,7 +135,7 @@ class ContentFinder:
 
     def get_content_hash(self, content):
         """Создает хеш контента"""
-        text = content['title'] + content['summary'][:100]
+        text = content['title'] + content['summary'][:150]
         return hashlib.md5(text.encode()).hexdigest()
 
     def parse_wikipedia_firsts(self):
@@ -134,7 +143,7 @@ class ContentFinder:
         try:
             articles = []
             
-            # Список тем для поиска первых событий
+            # Разнообразные запросы для поиска первых событий
             search_queries = [
                 "первый в мире",
                 "первое изобретение", 
@@ -145,10 +154,20 @@ class ContentFinder:
                 "первый телефон",
                 "первый автомобиль",
                 "первый фильм",
-                "первая книга"
+                "первая книга",
+                "первый спутник",
+                "первый человек в космосе",
+                "первая операция",
+                "первое лекарство",
+                "первый интернет",
+                "первый мобильный телефон",
+                "первый самолет",
+                "первая электрическая лампочка",
+                "первый телевизор",
+                "первое радио"
             ]
             
-            for query in random.sample(search_queries, 3):
+            for query in random.sample(search_queries, 4):  # Берем 4 случайных запроса
                 try:
                     url = "https://ru.wikipedia.org/w/api.php"
                     params = {
@@ -156,10 +175,11 @@ class ContentFinder:
                         'list': 'search',
                         'srsearch': query,
                         'format': 'json',
-                        'srlimit': 3
+                        'srlimit': 5,
+                        'srwhat': 'text'
                     }
                     
-                    response = self.session.get(url, params=params, timeout=10)
+                    response = self.session.get(url, params=params, timeout=15)
                     data = response.json()
                     
                     for item in data.get('query', {}).get('search', []):
@@ -172,281 +192,406 @@ class ContentFinder:
                         
                         if self.is_relevant_content(title + clean_snippet):
                             full_content = self.get_wikipedia_content(title)
-                            if full_content and len(full_content) > 50:
-                                formatted_post = self.format_wikipedia_post(title, full_content)
+                            if full_content and len(full_content) > 80:
+                                # Создаем уникальное описание
+                                formatted_post = self.create_wikipedia_post(title, full_content, query)
                                 
                                 articles.append({
                                     'title': title,
                                     'summary': formatted_post,
-                                    'category': 'history',
-                                    'url': f"https://ru.wikipedia.org/wiki/{title.replace(' ', '_')}",
+                                    'category': self.detect_category(title, full_content),
+                                    'url': f"https://ru.wikipedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}",
                                     'image_url': self.get_wikipedia_image(title),
                                     'found_date': datetime.now()
                                 })
                                 
-                                if len(articles) >= 2:
-                                    break
+                                if len(articles) >= 3:
+                                    return articles
                     
-                    time.sleep(1)  # Задержка между запросами
+                    time.sleep(1.5)  # Задержка между запросами
                     
                 except Exception as e:
                     logger.error(f"❌ Ошибка парсинга запроса {query}: {e}")
                     continue
                     
-            return articles
+            return articles[:2]  # Возвращаем не более 2 статей
             
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга Wikipedia: {e}")
             return []
 
-    def parse_historical_firsts(self):
-        """Парсинг исторических первых событий"""
+    def parse_historical_events(self):
+        """Парсинг исторических событий"""
         try:
-            # Используем исторические API и сайты
             articles = []
             
-            # Попробуем получить данные с исторических сайтов
-            sources = [
-                self.parse_russian_history,
-                self.parse_science_history
+            # Используем разные подходы для получения исторических фактов
+            historical_methods = [
+                self.parse_historical_dates,
+                self.parse_famous_firsts,
+                self.parse_invention_history
             ]
             
-            for source in sources:
+            for method in random.sample(historical_methods, 2):
                 try:
-                    content = source()
+                    content = method()
                     if content:
                         articles.extend(content)
                         if len(articles) >= 2:
                             break
                 except Exception as e:
-                    logger.error(f"❌ Ошибка источника истории: {e}")
+                    logger.error(f"❌ Ошибка метода истории: {e}")
                     continue
             
-            return articles
+            return articles[:2]
             
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга исторических событий: {e}")
             return []
 
-    def parse_russian_history(self):
-        """Парсинг русской истории - первые события"""
+    def parse_historical_dates(self):
+        """Парсинг исторических дат"""
         try:
-            # Исторические события России
-            url = "https://histrf.ru/read/articles"
-            response = self.session.get(url, timeout=10)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            articles = []
-            
-            # Ищем статьи с упоминанием первых событий
-            news_items = soup.find_all('article', class_=re.compile('article|news|item'))[:5]
-            
-            for item in news_items:
-                try:
-                    title_elem = item.find('h2') or item.find('h3') or item.find('a')
-                    if not title_elem:
-                        continue
-                    
-                    title = title_elem.get_text().strip()
-                    
-                    if self.is_relevant_content(title):
-                        # Получаем описание
-                        desc_elem = item.find('p') or item.find('div', class_=re.compile('desc|text|content'))
-                        description = desc_elem.get_text().strip() if desc_elem else ""
-                        
-                        formatted_post = self.format_historical_post(title, description)
-                        
-                        articles.append({
-                            'title': title,
-                            'summary': formatted_post,
-                            'category': 'history',
-                            'url': "https://histrf.ru",
-                            'image_url': self.get_historical_image(),
-                            'found_date': datetime.now()
-                        })
-                        
-                except Exception as e:
-                    continue
-                    
-            return articles
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка парсинга русской истории: {e}")
-            return []
-
-    def parse_science_firsts(self):
-        """Парсинг научных первых открытий"""
-        try:
-            articles = []
-            
-            # Популярные научные сайты
-            science_sources = [
-                "https://naked-science.ru",
-                "https://elementy.ru",
-                "https://scientificrussia.ru"
-            ]
-            
-            for source_url in random.sample(science_sources, 2):
-                try:
-                    response = self.session.get(source_url, timeout=10)
-                    soup = BeautifulSoup(response.content, 'html.parser')
-                    
-                    # Ищем статьи
-                    items = soup.find_all('article')[:3] or soup.find_all('div', class_=re.compile('article|news|post'))[:3]
-                    
-                    for item in items:
-                        try:
-                            title_elem = item.find('h2') or item.find('h3') or item.find('a')
-                            if not title_elem:
-                                continue
-                            
-                            title = title_elem.get_text().strip()
-                            
-                            if self.is_relevant_content(title):
-                                desc_elem = item.find('p') or item.find('div', class_=re.compile('desc|text|excerpt'))
-                                description = desc_elem.get_text().strip() if desc_elem else ""
-                                
-                                formatted_post = self.format_science_post(title, description)
-                                
-                                articles.append({
-                                    'title': title,
-                                    'summary': formatted_post,
-                                    'category': 'science',
-                                    'url': source_url,
-                                    'image_url': self.get_science_image(),
-                                    'found_date': datetime.now()
-                                })
-                                
-                                if len(articles) >= 2:
-                                    break
-                                    
-                        except Exception as e:
-                            continue
-                            
-                    time.sleep(1)
-                    
-                except Exception as e:
-                    logger.error(f"❌ Ошибка парсинга {source_url}: {e}")
-                    continue
-                    
-            return articles
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка парсинга научных новостей: {e}")
-            return []
-
-    def parse_tech_firsts(self):
-        """Парсинг технологических первых изобретений"""
-        try:
-            articles = []
-            
-            # Технологические сайты
-            tech_sources = [
-                "https://3dnews.ru",
-                "https://hi-news.ru",
-                "https://www.popmech.ru"
-            ]
-            
-            for source_url in random.sample(tech_sources, 2):
-                try:
-                    response = self.session.get(source_url, timeout=10)
-                    soup = BeautifulSoup(response.content, 'html.parser')
-                    
-                    # Ищем технологические новости
-                    items = soup.find_all('article')[:3] or soup.find_all('div', class_=re.compile('news|item|post'))[:3]
-                    
-                    for item in items:
-                        try:
-                            title_elem = item.find('h2') or item.find('h3') or item.find('a')
-                            if not title_elem:
-                                continue
-                            
-                            title = title_elem.get_text().strip()
-                            
-                            if self.is_relevant_content(title):
-                                desc_elem = item.find('p') or item.find('div', class_=re.compile('desc|text|excerpt'))
-                                description = desc_elem.get_text().strip() if desc_elem else ""
-                                
-                                formatted_post = self.format_tech_post(title, description)
-                                
-                                articles.append({
-                                    'title': title,
-                                    'summary': formatted_post,
-                                    'category': 'technology',
-                                    'url': source_url,
-                                    'image_url': self.get_tech_image(),
-                                    'found_date': datetime.now()
-                                })
-                                
-                                if len(articles) >= 2:
-                                    break
-                                    
-                        except Exception as e:
-                            continue
-                            
-                    time.sleep(1)
-                    
-                except Exception as e:
-                    logger.error(f"❌ Ошибка парсинга {source_url}: {e}")
-                    continue
-                    
-            return articles
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка парсинга технологических новостей: {e}")
-            return []
-
-    def parse_science_history(self):
-        """Парсинг истории науки"""
-        try:
-            # Альтернативный источник исторических фактов
-            articles = []
-            
-            # Создаем контент на основе известных исторических фактов
-            historical_facts = [
+            # Исторические события с упором на "первые"
+            historical_events = [
                 {
-                    'title': 'Первый искусственный спутник Земли',
-                    'content': 'Запуск первого в мире искусственного спутника Земли состоялся 4 октября 1957 года. Спутник ПС-1 был запущен с космодрома Байконур и открыл космическую эру человечества.',
-                    'category': 'space'
+                    'title': 'Первая печатная книга',
+                    'content': 'Библия Гутенберга, изданная в 1455 году, стала первой книгой, напечатанной с использованием подвижного шрифта. Это изобретение Иоганна Гутенберга революционизировало распространение знаний.',
+                    'year': '1455'
                 },
                 {
-                    'title': 'Первая фотография в истории',
-                    'content': 'Первая в истории фотография была сделана Жозефом Нисефором Ньепсом в 1826 году. Снимок «Вид из окна в Ле Гра» создавался в течение 8 часов экспозиции.',
-                    'category': 'photography'
+                    'title': 'Первая фотография',
+                    'content': 'В 1826 году Жозеф Нисефор Ньепс создал первую в истории фотографию «Вид из окна в Ле Гра». Экспозиция длилась 8 часов.',
+                    'year': '1826'
                 },
                 {
-                    'title': 'Первый полет человека в космос',
-                    'content': '12 апреля 1961 года Юрий Гагарин стал первым человеком, совершившим полет в космос на корабле «Восток-1». Полет длился 108 минут.',
-                    'category': 'space'
+                    'title': 'Первый полет братьев Райт',
+                    'content': '17 декабря 1903 года братья Райт совершили первый управляемый полет на самолете с двигателем. Продолжительность полета составила 12 секунд.',
+                    'year': '1903'
                 },
                 {
-                    'title': 'Первое использование анестезии',
-                    'content': '16 октября 1846 года Уильям Мортон впервые публично продемонстрировал применение эфирной анестезии во время операции в Массачусетской больнице.',
-                    'category': 'medicine'
-                },
-                {
-                    'title': 'Первый телефонный разговор',
-                    'content': '10 марта 1876 года Александр Белл произнес первые слова по телефону: «Мистер Ватсон, идите сюда, вы мне нужны».',
-                    'category': 'technology'
+                    'title': 'Первая успешная трансплантация сердца',
+                    'content': '3 декабря 1967 года Кристиан Барнард провел первую успешную пересадку сердца человеку. Операция длилась 9 часов.',
+                    'year': '1967'
                 }
             ]
             
-            for fact in random.sample(historical_facts, 2):
-                formatted_post = self.format_historical_post(fact['title'], fact['content'])
+            articles = []
+            for event in random.sample(historical_events, 2):
+                formatted_post = self.format_historical_post(event['title'], event['content'], event['year'])
                 
                 articles.append({
-                    'title': fact['title'],
+                    'title': event['title'],
                     'summary': formatted_post,
-                    'category': fact['category'],
+                    'category': 'history',
                     'url': '',
-                    'image_url': self.get_category_image(fact['category']),
+                    'image_url': self.get_historical_image(),
                     'found_date': datetime.now()
                 })
             
             return articles
             
         except Exception as e:
-            logger.error(f"❌ Ошибка создания исторического контента: {e}")
+            logger.error(f"❌ Ошибка создания исторических дат: {e}")
+            return []
+
+    def parse_famous_firsts(self):
+        """Известные первые достижения"""
+        try:
+            firsts = [
+                {
+                    'title': 'Первая женщина-космонавт',
+                    'content': 'Валентина Терешкова стала первой женщиной в космосе 16 июня 1963 года на корабле Восток-6. Ее полет длился почти трое суток.',
+                    'person': 'Валентина Терешкова'
+                },
+                {
+                    'title': 'Первый программист',
+                    'content': 'Ада Лавлейс считается первым программистом в истории. В 1843 году она написала первую в мире программу для аналитической машины Чарльза Бэббиджа.',
+                    'person': 'Ада Лавлейс'
+                },
+                {
+                    'title': 'Первый нобелевский лауреат',
+                    'content': 'Вильгельм Конрад Рентген стал первым лауреатом Нобелевской премии по физике в 1901 году за открытие рентгеновских лучей.',
+                    'person': 'Вильгельм Рентген'
+                }
+            ]
+            
+            articles = []
+            for first in random.sample(firsts, 2):
+                formatted_post = self.format_person_post(first['title'], first['content'], first['person'])
+                
+                articles.append({
+                    'title': first['title'],
+                    'summary': formatted_post,
+                    'category': 'achievement',
+                    'url': '',
+                    'image_url': self.get_achievement_image(),
+                    'found_date': datetime.now()
+                })
+            
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания первых достижений: {e}")
+            return []
+
+    def parse_science_discoveries(self):
+        """Парсинг научных открытий"""
+        try:
+            articles = []
+            
+            # Научные открытия и изобретения
+            discoveries = [
+                {
+                    'title': 'Открытие пенициллина',
+                    'content': 'Александр Флеминг случайно открыл пенициллин в 1928 году. Это первый антибиотик, который произвел революцию в медицине.',
+                    'year': '1928',
+                    'scientist': 'Александр Флеминг'
+                },
+                {
+                    'title': 'Первая вакцина',
+                    'content': 'Эдвард Дженнер создал первую вакцину против оспы в 1796 году. Он использовал вирус коровьей оспы для защиты от натуральной оспы.',
+                    'year': '1796',
+                    'scientist': 'Эдвард Дженнер'
+                },
+                {
+                    'title': 'Открытие структуры ДНК',
+                    'content': 'Джеймс Уотсон и Фрэнсис Крик открыли двойную спираль ДНК в 1953 году. Это фундаментальное открытие в генетике.',
+                    'year': '1953',
+                    'scientist': 'Уотсон и Крик'
+                },
+                {
+                    'title': 'Первый телескоп',
+                    'content': 'Галилео Галилей первым использовал телескоп для астрономических наблюдений в 1609 году. Он открыл спутники Юпитера и фазы Венеры.',
+                    'year': '1609',
+                    'scientist': 'Галилео Галилей'
+                }
+            ]
+            
+            for discovery in random.sample(discoveries, 2):
+                formatted_post = self.format_science_post(
+                    discovery['title'], 
+                    discovery['content'], 
+                    discovery['year'], 
+                    discovery['scientist']
+                )
+                
+                articles.append({
+                    'title': discovery['title'],
+                    'summary': formatted_post,
+                    'category': 'science',
+                    'url': '',
+                    'image_url': self.get_science_image(),
+                    'found_date': datetime.now()
+                })
+            
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания научных открытий: {e}")
+            return []
+
+    def parse_tech_innovations(self):
+        """Парсинг технологических инноваций"""
+        try:
+            articles = []
+            
+            # Технологические инновации
+            innovations = [
+                {
+                    'title': 'Первый смартфон',
+                    'content': 'IBM Simon, выпущенный в 1994 году, считается первым смартфоном. Он сочетал функции телефона и КПК.',
+                    'year': '1994',
+                    'company': 'IBM'
+                },
+                {
+                    'title': 'Первый веб-сайт',
+                    'content': 'Первый в мире веб-сайт info.cern.ch был запущен Тимом Бернерсом-Ли в 1991 году. Он объяснял концепцию Всемирной паутины.',
+                    'year': '1991',
+                    'company': 'CERN'
+                },
+                {
+                    'title': 'Первый микропроцессор',
+                    'content': 'Intel 4004, выпущенный в 1971 году, стал первым коммерческим микропроцессором. Он содержал 2300 транзисторов.',
+                    'year': '1971',
+                    'company': 'Intel'
+                },
+                {
+                    'title': 'Первая компьютерная мышь',
+                    'content': 'Дуглас Энгельбарт изобрел первую компьютерную мышь в 1964 году. Устройство было деревянным с двумя металлическими колесами.',
+                    'year': '1964',
+                    'company': 'Stanford Research Institute'
+                }
+            ]
+            
+            for innovation in random.sample(innovations, 2):
+                formatted_post = self.format_tech_post(
+                    innovation['title'], 
+                    innovation['content'], 
+                    innovation['year'], 
+                    innovation['company']
+                )
+                
+                articles.append({
+                    'title': innovation['title'],
+                    'summary': formatted_post,
+                    'category': 'technology',
+                    'url': '',
+                    'image_url': self.get_tech_image(),
+                    'found_date': datetime.now()
+                })
+            
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания технологических инноваций: {e}")
+            return []
+
+    def parse_cultural_firsts(self):
+        """Парсинг культурных первых"""
+        try:
+            articles = []
+            
+            cultural_firsts = [
+                {
+                    'title': 'Первый полнометражный мультфильм',
+                    'content': '«Белоснежка и семь гномов» (1937) стал первым полнометражным анимационным фильмом. Производство заняло 3 года.',
+                    'year': '1937',
+                    'studio': 'Walt Disney'
+                },
+                {
+                    'title': 'Первая звуковая кинокартина',
+                    'content': '«Певец джаза» (1927) стал первым полнометражным фильмом с синхронной звуковой дорожкой.',
+                    'year': '1927',
+                    'studio': 'Warner Bros.'
+                },
+                {
+                    'title': 'Первый роман-антиутопия',
+                    'content': '«Мы» Евгения Замятина (1920) считается первым романом-антиутопией, повлиявшим на Оруэлла и Хаксли.',
+                    'year': '1920',
+                    'author': 'Евгений Замятин'
+                }
+            ]
+            
+            for cultural in random.sample(cultural_firsts, 2):
+                formatted_post = self.format_cultural_post(
+                    cultural['title'], 
+                    cultural['content'], 
+                    cultural['year'], 
+                    cultural.get('studio') or cultural.get('author')
+                )
+                
+                articles.append({
+                    'title': cultural['title'],
+                    'summary': formatted_post,
+                    'category': 'culture',
+                    'url': '',
+                    'image_url': self.get_cultural_image(),
+                    'found_date': datetime.now()
+                })
+            
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания культурных первых: {e}")
+            return []
+
+    def parse_sports_records(self):
+        """Парсинг спортивных рекордов"""
+        try:
+            articles = []
+            
+            sports_records = [
+                {
+                    'title': 'Первый четырехминутный миля',
+                    'content': 'Роджер Баннистер первым пробежал милю быстрее 4 минут 6 мая 1954 года. Его результат: 3 минуты 59.4 секунды.',
+                    'year': '1954',
+                    'athlete': 'Роджер Баннистер'
+                },
+                {
+                    'title': 'Первое восхождение на Эверест',
+                    'content': 'Эдмунд Хиллари и Тенцинг Норгей первыми покорили Эверест 29 мая 1953 года.',
+                    'year': '1953',
+                    'athlete': 'Хиллари и Норгей'
+                },
+                {
+                    'title': 'Первый олимпийский чемпион',
+                    'content': 'Джеймс Конноли стал первым олимпийским чемпионом современности, выиграв тройной прыжок 6 апреля 1896 года.',
+                    'year': '1896',
+                    'athlete': 'Джеймс Конноли'
+                }
+            ]
+            
+            for record in random.sample(sports_records, 2):
+                formatted_post = self.format_sports_post(
+                    record['title'], 
+                    record['content'], 
+                    record['year'], 
+                    record['athlete']
+                )
+                
+                articles.append({
+                    'title': record['title'],
+                    'summary': formatted_post,
+                    'category': 'sports',
+                    'url': '',
+                    'image_url': self.get_sports_image(),
+                    'found_date': datetime.now()
+                })
+            
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания спортивных рекордов: {e}")
+            return []
+
+    def parse_invention_history(self):
+        """История изобретений"""
+        try:
+            articles = []
+            
+            inventions = [
+                {
+                    'title': 'Изобретение печатного станка',
+                    'content': 'Иоганн Гутенберг изобрел печатный станок с подвижными литерами около 1440 года. Это изобретение революционизировало распространение информации.',
+                    'year': '1440',
+                    'inventor': 'Иоганн Гутенберг'
+                },
+                {
+                    'title': 'Изобретение лампочки',
+                    'content': 'Томас Эдисон запатентовал первую практическую лампу накаливания в 1879 году. Она могла гореть до 1200 часов.',
+                    'year': '1879',
+                    'inventor': 'Томас Эдисон'
+                },
+                {
+                    'title': 'Изобретение радио',
+                    'content': 'Александр Попов продемонстрировал первый радиоприемник 7 мая 1895 года. Гульельмо Маркони независимо разработал похожую систему.',
+                    'year': '1895',
+                    'inventor': 'Александр Попов'
+                }
+            ]
+            
+            for invention in random.sample(inventions, 2):
+                formatted_post = self.format_invention_post(
+                    invention['title'], 
+                    invention['content'], 
+                    invention['year'], 
+                    invention['inventor']
+                )
+                
+                articles.append({
+                    'title': invention['title'],
+                    'summary': formatted_post,
+                    'category': 'invention',
+                    'url': '',
+                    'image_url': self.get_invention_image(),
+                    'found_date': datetime.now()
+                })
+            
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания истории изобретений: {e}")
             return []
 
     def get_wikipedia_content(self, title):
@@ -462,20 +607,22 @@ class ContentFinder:
                 'format': 'json'
             }
             
-            response = self.session.get(url, params=params, timeout=10)
+            response = self.session.get(url, params=params, timeout=15)
             data = response.json()
             
             pages = data.get('query', {}).get('pages', {})
             for page_id, page_data in pages.items():
                 extract = page_data.get('extract', '')
                 if extract:
-                    # Берем первый абзац
-                    first_para = extract.split('\n')[0]
-                    return first_para[:500] + '...' if len(first_para) > 500 else first_para
+                    # Берем первый значимый абзац
+                    paragraphs = [p for p in extract.split('\n') if p.strip()]
+                    if paragraphs:
+                        return paragraphs[0][:600] + '...' if len(paragraphs[0]) > 600 else paragraphs[0]
             
             return ""
             
         except Exception as e:
+            logger.error(f"❌ Ошибка получения контента Wikipedia: {e}")
             return ""
 
     def get_wikipedia_image(self, title):
@@ -490,7 +637,7 @@ class ContentFinder:
                 'format': 'json'
             }
             
-            response = self.session.get(url, params=params, timeout=10)
+            response = self.session.get(url, params=params, timeout=15)
             data = response.json()
             
             pages = data.get('query', {}).get('pages', {})
@@ -499,61 +646,126 @@ class ContentFinder:
                 if thumbnail:
                     return thumbnail.get('source', '')
             
-            return self.get_category_image('history')
+            return self.get_random_image()
             
         except Exception as e:
-            return self.get_category_image('history')
+            logger.error(f"❌ Ошибка получения изображения Wikipedia: {e}")
+            return self.get_random_image()
 
-    def format_wikipedia_post(self, title, content):
-        """Форматирует Wikipedia пост"""
+    def create_wikipedia_post(self, title, content, query):
+        """Создает пост на основе Wikipedia контента"""
         templates = [
-            "🌍 ИСТОРИЧЕСКОЕ СОБЫТИЕ\n\n{title}\n\n{content}\n\n📚 Это событие стало важной вехой в истории человечества.\n\n#история #событие #память",
+            "🌍 ИСТОРИЧЕСКОЕ СОБЫТИЕ\n\n{title}\n\n{content}\n\n🔍 Найдено по запросу: {query}\n\n📚 Это событие стало важной вехой в истории человечества.\n\n#история #событие #память",
             
-            "💫 ПЕРВЫЙ ШАГ\n\n{title}\n\n{content}\n\n🚀 Это достижение открыло новые возможности для развития цивилизации.\n\n#первый #история #достижение"
+            "💫 ПЕРВЫЙ ШАГ\n\n{title}\n\n{content}\n\n🔍 Найдено по запросу: {query}\n\n🚀 Это достижение открыло новые возможности для развития цивилизации.\n\n#первый #история #достижение",
+            
+            "🏆 ВАЖНОЕ ОТКРЫТИЕ\n\n{title}\n\n{content}\n\n🔍 Найдено по запросу: {query}\n\n💡 Это изобретение изменило ход истории и продолжает влиять на нашу жизнь.\n\n#открытие #изобретение #история"
         ]
         
         template = random.choice(templates)
-        return template.format(title=title.upper(), content=content)
+        return template.format(title=title.upper(), content=content, query=query)
 
-    def format_science_post(self, title, content):
-        """Форматирует научный пост"""
-        templates = [
-            "🔬 НАУЧНОЕ ОТКРЫТИЕ\n\n{title}\n\n{content}\n\n💫 Это открытие изменило наши представления о мире.\n\n#наука #открытие #исследование",
-            
-            "🌌 ПРОРЫВ В НАУКЕ\n\n{title}\n\n{content}\n\n🚀 Ученые совершили важный шаг в понимании законов природы.\n\n#наука #прорыв #исследование"
-        ]
-        
-        template = random.choice(templates)
-        return template.format(title=title.upper(), content=content)
-
-    def format_tech_post(self, title, content):
-        """Форматирует технологический пост"""
-        templates = [
-            "⚡ ТЕХНОЛОГИЧЕСКАЯ РЕВОЛЮЦИЯ\n\n{title}\n\n{content}\n\n💡 Это изобретение изменило подход к решению задач.\n\n#технологии #инновации #будущее",
-            
-            "🤖 ИННОВАЦИОННАЯ РАЗРАБОТКА\n\n{title}\n\n{content}\n\n🚀 Прогресс не стоит на месте - это достижение демонстрирует новые горизонты.\n\n#технологии #разработка #инновации"
-        ]
-        
-        template = random.choice(templates)
-        return template.format(title=title.upper(), content=content)
-
-    def format_historical_post(self, title, content):
+    def format_historical_post(self, title, content, year):
         """Форматирует исторический пост"""
         templates = [
-            "🏆 ИСТОРИЧЕСКИЙ ФАКТ\n\n{title}\n\n{content}\n\n📚 Это событие стало поворотным моментом в истории.\n\n#история #факт #память",
+            "📜 ИСТОРИЧЕСКИЙ ФАКТ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n\n📚 Это событие стало поворотным моментом в истории.\n\n#история #факт #память",
             
-            "💡 ВЕЛИКОЕ ОТКРЫТИЕ\n\n{title}\n\n{content}\n\n🎯 Это достижение изменило ход истории.\n\n#история #открытие #достижение"
+            "🕰️ ВЕХА ИСТОРИИ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n\n🎯 Это достижение изменило ход истории.\n\n#история #веха #достижение"
         ]
         
         template = random.choice(templates)
-        return template.format(title=title.upper(), content=content)
+        return template.format(title=title.upper(), content=content, year=year)
+
+    def format_science_post(self, title, content, year, scientist):
+        """Форматирует научный пост"""
+        templates = [
+            "🔬 НАУЧНОЕ ОТКРЫТИЕ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n👨‍🔬 Ученый: {scientist}\n\n💫 Это открытие изменило наши представления о мире.\n\n#наука #открытие #исследование",
+            
+            "🌌 ПРОРЫВ В НАУКЕ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n👨‍🔬 Ученый: {scientist}\n\n🚀 Ученые совершили важный шаг в понимании законов природы.\n\n#наука #прорыв #исследование"
+        ]
+        
+        template = random.choice(templates)
+        return template.format(title=title.upper(), content=content, year=year, scientist=scientist)
+
+    def format_tech_post(self, title, content, year, company):
+        """Форматирует технологический пост"""
+        templates = [
+            "⚡ ТЕХНОЛОГИЧЕСКАЯ РЕВОЛЮЦИЯ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🏢 Компания: {company}\n\n💡 Это изобретение изменило подход к решению задач.\n\n#технологии #инновации #будущее",
+            
+            "🤖 ИННОВАЦИОННАЯ РАЗРАБОТКА\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🏢 Компания: {company}\n\n🚀 Прогресс не стоит на месте - это достижение демонстрирует новые горизонты.\n\n#технологии #разработка #инновации"
+        ]
+        
+        template = random.choice(templates)
+        return template.format(title=title.upper(), content=content, year=year, company=company)
+
+    def format_person_post(self, title, content, person):
+        """Форматирует пост о личности"""
+        templates = [
+            "🌟 ИСТОРИЧЕСКАЯ ЛИЧНОСТЬ\n\n{title}\n\n{content}\n\n👤 Персона: {person}\n\n💫 Это достижение навсегда изменило мир.\n\n#история #личность #достижение",
+            
+            "🎯 ПЕРВЫЙ ШАГ\n\n{title}\n\n{content}\n\n👤 Персона: {person}\n\n🚀 С этого момента началась новая эра.\n\n#первый #история #изобретение"
+        ]
+        
+        template = random.choice(templates)
+        return template.format(title=title.upper(), content=content, person=person)
+
+    def format_cultural_post(self, title, content, year, creator):
+        """Форматирует культурный пост"""
+        templates = [
+            "🎭 КУЛЬТУРНОЕ СОБЫТИЕ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🎬 Создатель: {creator}\n\n📚 Это произведение изменило культурный ландшафт.\n\n#культура #искусство #история",
+            
+            "🎨 ТВОРЧЕСКИЙ ПРОРЫВ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🎬 Создатель: {creator}\n\n💫 Это достижение открыло новые горизонты в искусстве.\n\n#культура #творчество #инновации"
+        ]
+        
+        template = random.choice(templates)
+        return template.format(title=title.upper(), content=content, year=year, creator=creator)
+
+    def format_sports_post(self, title, content, year, athlete):
+        """Форматирует спортивный пост"""
+        templates = [
+            "🏆 СПОРТИВНЫЙ РЕКОРД\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🏃‍♂️ Спортсмен: {athlete}\n\n💪 Это достижение показало новые возможности человека.\n\n#спорт #рекорд #достижение",
+            
+            "🚀 ИСТОРИЧЕСКИЙ МОМЕНТ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🏃‍♂️ Спортсмен: {athlete}\n\n🎯 Этот рекорд навсегда вошел в историю спорта.\n\n#спорт #история #момент"
+        ]
+        
+        template = random.choice(templates)
+        return template.format(title=title.upper(), content=content, year=year, athlete=athlete)
+
+    def format_invention_post(self, title, content, year, inventor):
+        """Форматирует пост об изобретении"""
+        templates = [
+            "💡 ВЕЛИКОЕ ИЗОБРЕТЕНИЕ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n👨‍🔬 Изобретатель: {inventor}\n\n⚡ Это изобретение кардинально изменило жизнь людей.\n\n#изобретение #инновации #история",
+            
+            "🔧 ТЕХНИЧЕСКИЙ ПРОРЫВ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n👨‍🔬 Изобретатель: {inventor}\n\n🚀 Это достижение открыло новые технологические горизонты.\n\n#технологии #прорыв #изобретение"
+        ]
+        
+        template = random.choice(templates)
+        return template.format(title=title.upper(), content=content, year=year, inventor=inventor)
+
+    def detect_category(self, title, content):
+        """Определяет категорию контента"""
+        text = (title + content).lower()
+        
+        if any(word in text for word in ['наука', 'ученый', 'открытие', 'исследование']):
+            return 'science'
+        elif any(word in text for word in ['технология', 'компьютер', 'интернет', 'смартфон']):
+            return 'technology'
+        elif any(word in text for word in ['история', 'исторический', 'прошлое', 'древний']):
+            return 'history'
+        elif any(word in text for word in ['культура', 'искусство', 'кино', 'музыка']):
+            return 'culture'
+        elif any(word in text for word in ['спорт', 'спортсмен', 'рекорд', 'олимпийский']):
+            return 'sports'
+        else:
+            return 'achievement'
 
     def get_science_image(self):
         """Возвращает изображение для научных постов"""
         science_images = [
             'https://images.unsplash.com/photo-1532094349884-543bc11b234d?w=500&fit=crop',
             'https://images.unsplash.com/photo-1563089145-599997674d42?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1554475900-0a0350e3fc7b?w=500&fit=crop'
+            'https://images.unsplash.com/photo-1554475900-0a0350e3fc7b?w=500&fit=crop',
+            'https://images.unsplash.com/photo-1507413245164-6160d8298b31?w=500&fit=crop'
         ]
         return random.choice(science_images)
 
@@ -562,7 +774,8 @@ class ContentFinder:
         tech_images = [
             'https://images.unsplash.com/photo-1518709268805-4e9042af2176?w=500&fit=crop',
             'https://images.unsplash.com/photo-1517077304055-6e89abbf09b0?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1542831371-29b0f74f9713?w=500&fit=crop'
+            'https://images.unsplash.com/photo-1542831371-29b0f74f9713?w=500&fit=crop',
+            'https://images.unsplash.com/photo-1550751827-4bd374c3f58b?w=500&fit=crop'
         ]
         return random.choice(tech_images)
 
@@ -571,21 +784,59 @@ class ContentFinder:
         historical_images = [
             'https://images.unsplash.com/photo-1481627834876-b7833e8f5570?w=500&fit=crop',
             'https://images.unsplash.com/photo-1589652717521-10c0d092dea9?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=500&fit=crop'
+            'https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=500&fit=crop',
+            'https://images.unsplash.com/photo-1505664194779-8beaceb93744?w=500&fit=crop'
         ]
         return random.choice(historical_images)
 
-    def get_category_image(self, category):
-        """Возвращает изображение по категории"""
-        category_images = {
-            'space': 'https://images.unsplash.com/photo-1446776653964-20c1d3a81b06?w=500&fit=crop',
-            'technology': 'https://images.unsplash.com/photo-1518709268805-4e9042af2176?w=500&fit=crop',
-            'photography': 'https://images.unsplash.com/photo-1516035069371-29a1b244cc32?w=500&fit=crop',
-            'medicine': 'https://images.unsplash.com/photo-1559757148-5c350d0d3c56?w=500&fit=crop',
-            'history': 'https://images.unsplash.com/photo-1481627834876-b7833e8f5570?w=500&fit=crop',
-            'science': 'https://images.unsplash.com/photo-1532094349884-543bc11b234d?w=500&fit=crop'
-        }
-        return category_images.get(category, 'https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=500&fit=crop')
+    def get_cultural_image(self):
+        """Возвращает изображение для культурных постов"""
+        cultural_images = [
+            'https://images.unsplash.com/photo-1514320291840-2e0a9bf2a9ae?w=500&fit=crop',
+            'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=500&fit=crop',
+            'https://images.unsplash.com/photo-1503095396549-807759245b35?w=500&fit=crop'
+        ]
+        return random.choice(cultural_images)
+
+    def get_sports_image(self):
+        """Возвращает изображение для спортивных постов"""
+        sports_images = [
+            'https://images.unsplash.com/photo-1461896836934-ffe607ba8211?w=500&fit=crop',
+            'https://images.unsplash.com/photo-1571019613454-1cb2f99b2d8b?w=500&fit=crop',
+            'https://images.unsplash.com/photo-1556817411-31ae72fa3ea0?w=500&fit=crop'
+        ]
+        return random.choice(sports_images)
+
+    def get_achievement_image(self):
+        """Возвращает изображение для постов о достижениях"""
+        achievement_images = [
+            'https://images.unsplash.com/photo-1563089145-599997674d42?w=500&fit=crop',
+            'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=500&fit=crop',
+            'https://images.unsplash.com/photo-1517048676732-d65bc937f952?w=500&fit=crop'
+        ]
+        return random.choice(achievement_images)
+
+    def get_invention_image(self):
+        """Возвращает изображение для постов об изобретениях"""
+        invention_images = [
+            'https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=500&fit=crop',
+            'https://images.unsplash.com/photo-1518709268805-4e9042af2176?w=500&fit=crop',
+            'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=500&fit=crop'
+        ]
+        return random.choice(invention_images)
+
+    def get_random_image(self):
+        """Возвращает случайное изображение"""
+        all_images = (
+            self.get_science_image(),
+            self.get_tech_image(),
+            self.get_historical_image(),
+            self.get_cultural_image(),
+            self.get_sports_image(),
+            self.get_achievement_image(),
+            self.get_invention_image()
+        )
+        return random.choice(all_images)
 
     def is_relevant_content(self, text):
         """Проверяет релевантность контента - ищем упоминания первых событий"""
@@ -594,7 +845,9 @@ class ContentFinder:
             'изобретение', 'открытие', 'революция', 'прорыв',
             'рекорд', 'история', 'создан', 'разработан', 'запущен',
             'обнаружен', 'начало', 'возникновение', 'появление',
-            'основание', 'создание', 'изобрет', 'открыт'
+            'основание', 'создание', 'изобрет', 'открыт', 'новая эра',
+            'переломный момент', 'знаковое', 'эпохальное', 'пионер',
+            'первооткрыватель', 'новатор', 'инновац'
         ]
         text_lower = text.lower()
         return any(keyword in text_lower for keyword in keywords)
