@@ -9,6 +9,7 @@ import re
 import json
 import time
 import urllib.parse
+import feedparser
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +24,13 @@ class ContentFinder:
         self.post_hashes = set()
         self.load_existing_hashes()
         
-        # Более разнообразные источники
+        # Реальные источники для парсинга
         self.sources = [
-            self.parse_wikipedia_firsts,
-            self.parse_historical_events,
-            self.parse_science_discoveries,
-            self.parse_tech_innovations,
-            self.parse_cultural_firsts,
-            self.parse_sports_records
+            self.parse_google_news,
+            self.parse_science_news,
+            self.parse_tech_news,
+            self.parse_historical_facts,
+            self.parse_wikipedia_firsts
         ]
 
     def load_existing_hashes(self):
@@ -43,7 +43,7 @@ class ContentFinder:
                 existing_posts = cursor.fetchall()
                 
                 for title, content in existing_posts:
-                    text = title + content[:200]  # Берем только начало контента
+                    text = title + content[:200]
                     content_hash = hashlib.md5(text.encode()).hexdigest()
                     self.post_hashes.add(content_hash)
                     
@@ -57,14 +57,13 @@ class ContentFinder:
         
         found_content = []
         attempts = 0
-        max_attempts = 10
-        
-        # Перемешиваем источники для разнообразия
-        random.shuffle(self.sources)
+        max_attempts = 8
         
         while len(found_content) < max_posts and attempts < max_attempts:
             attempts += 1
             logger.info(f"🔍 Попытка {attempts}/{max_attempts}")
+            
+            random.shuffle(self.sources)
             
             for source in self.sources:
                 try:
@@ -77,6 +76,10 @@ class ContentFinder:
                     if content_list:
                         for content in content_list:
                             if self.is_truly_unique_content(content) and len(found_content) < max_posts:
+                                # Улучшаем изображение перед сохранением
+                                if not content.get('image_url') or 'unsplash' in content.get('image_url', ''):
+                                    content['image_url'] = self.get_relevant_image(content['title'], content['summary'])
+                                
                                 found_content.append(content)
                                 content_hash = self.get_content_hash(content)
                                 self.post_hashes.add(content_hash)
@@ -84,14 +87,11 @@ class ContentFinder:
                             
                             if len(found_content) >= max_posts:
                                 break
-                    else:
-                        logger.info(f"ℹ️ Источник {source.__name__} не вернул контент")
                 
                 except Exception as e:
                     logger.error(f"❌ Ошибка источника {source.__name__}: {e}")
                     continue
                 
-            # Увеличиваем задержку между попытками
             time.sleep(2)
         
         logger.info(f"🎯 Найдено уникальных материалов: {len(found_content)}")
@@ -119,7 +119,6 @@ class ContentFinder:
             conn = self.db_manager.get_connection()
             cursor = conn.cursor()
             
-            # Более гибкая проверка - ищем похожие заголовки
             search_term = content['title'][:40]
             cursor.execute('''
                 SELECT id FROM found_content 
@@ -138,36 +137,286 @@ class ContentFinder:
         text = content['title'] + content['summary'][:150]
         return hashlib.md5(text.encode()).hexdigest()
 
+    def parse_google_news(self):
+        """Парсинг Google News по тематике первых событий"""
+        try:
+            articles = []
+            
+            keywords = [
+                "первое изобретение", "первое открытие", "революционное открытие",
+                "историческое открытие", "прорыв в науке", "первый в мире",
+                "впервые в истории", "новая эра", "знаковое открытие"
+            ]
+            
+            for keyword in random.sample(keywords, 3):
+                try:
+                    url = f"https://news.google.com/rss/search?q={urllib.parse.quote(keyword)}&hl=ru&gl=RU&ceid=RU:ru"
+                    
+                    response = self.session.get(url, timeout=15)
+                    if response.status_code == 200:
+                        feed = feedparser.parse(response.content)
+                        
+                        for entry in feed.entries[:5]:
+                            title = entry.title
+                            summary = entry.get('summary', '') or entry.get('description', '')
+                            link = entry.link
+                            
+                            if self.is_relevant_content(title + summary):
+                                full_content = self.get_article_content(link)
+                                image_url = self.extract_image_from_article(link) or self.get_relevant_image(title, summary)
+                                
+                                formatted_post = self.format_news_post(title, full_content or summary, keyword)
+                                
+                                articles.append({
+                                    'title': title,
+                                    'summary': formatted_post,
+                                    'category': 'news',
+                                    'url': link,
+                                    'image_url': image_url,
+                                    'found_date': datetime.now()
+                                })
+                                
+                                if len(articles) >= 3:
+                                    return articles
+                    
+                    time.sleep(2)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка парсинга ключевого слова {keyword}: {e}")
+                    continue
+                    
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга Google News: {e}")
+            return []
+
+    def parse_science_news(self):
+        """Парсинг научных новостей"""
+        try:
+            articles = []
+            
+            science_feeds = [
+                "https://naked-science.ru/rss.xml",
+                "https://scientificrussia.ru/rss",
+                "https://elementy.ru/rss",
+                "https://www.popmech.ru/rss/"
+            ]
+            
+            for feed_url in random.sample(science_feeds, 2):
+                try:
+                    response = self.session.get(feed_url, timeout=15)
+                    if response.status_code == 200:
+                        feed = feedparser.parse(response.content)
+                        
+                        for entry in feed.entries[:5]:
+                            title = entry.title
+                            summary = entry.get('summary', '') or entry.get('description', '')
+                            link = entry.link
+                            
+                            if self.is_relevant_content(title + summary):
+                                image_url = self.extract_image_from_article(link) or self.get_relevant_image(title, summary)
+                                
+                                formatted_post = self.format_science_post(title, summary)
+                                
+                                articles.append({
+                                    'title': title,
+                                    'summary': formatted_post,
+                                    'category': 'science',
+                                    'url': link,
+                                    'image_url': image_url,
+                                    'found_date': datetime.now()
+                                })
+                                
+                                if len(articles) >= 3:
+                                    return articles
+                    
+                    time.sleep(2)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка парсинга ленты {feed_url}: {e}")
+                    continue
+                    
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга научных новостей: {e}")
+            return []
+
+    def parse_tech_news(self):
+        """Парсинг технологических новостей"""
+        try:
+            articles = []
+            
+            tech_feeds = [
+                "https://3dnews.ru/news/rss/",
+                "https://hi-news.ru/feed",
+                "https://www.ixbt.com/export/news.rss",
+                "https://habr.com/ru/rss/articles/"
+            ]
+            
+            for feed_url in random.sample(tech_feeds, 2):
+                try:
+                    response = self.session.get(feed_url, timeout=15)
+                    if response.status_code == 200:
+                        feed = feedparser.parse(response.content)
+                        
+                        for entry in feed.entries[:5]:
+                            title = entry.title
+                            summary = entry.get('summary', '') or entry.get('description', '')
+                            link = entry.link
+                            
+                            if self.is_relevant_content(title + summary):
+                                image_url = self.extract_image_from_article(link) or self.get_relevant_image(title, summary)
+                                
+                                formatted_post = self.format_tech_post(title, summary)
+                                
+                                articles.append({
+                                    'title': title,
+                                    'summary': formatted_post,
+                                    'category': 'technology',
+                                    'url': link,
+                                    'image_url': image_url,
+                                    'found_date': datetime.now()
+                                })
+                                
+                                if len(articles) >= 3:
+                                    return articles
+                    
+                    time.sleep(2)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка парсинга ленты {feed_url}: {e}")
+                    continue
+                    
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга технологических новостей: {e}")
+            return []
+
+    def parse_historical_facts(self):
+        """Парсинг исторических фактов"""
+        try:
+            articles = []
+            
+            historical_sources = [
+                self.parse_historical_events_api,
+                self.parse_wikipedia_today_in_history
+            ]
+            
+            for source in historical_sources:
+                try:
+                    content = source()
+                    if content:
+                        articles.extend(content)
+                        if len(articles) >= 2:
+                            break
+                except Exception as e:
+                    logger.error(f"❌ Ошибка исторического источника: {e}")
+                    continue
+            
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга исторических фактов: {e}")
+            return []
+
+    def parse_historical_events_api(self):
+        """Парсинг исторических событий через API"""
+        try:
+            articles = []
+            
+            today = datetime.now()
+            url = f"http://history.muffinlabs.com/date/{today.month}/{today.day}"
+            
+            response = self.session.get(url, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                
+                events = data.get('data', {}).get('Events', [])
+                for event in events[:5]:
+                    year = event.get('year', '')
+                    text = event.get('text', '')
+                    
+                    if self.is_relevant_content(text):
+                        image_url = self.get_historical_image_for_event(text, year)
+                        
+                        formatted_post = self.format_historical_post(f"Событие {year} года", text, year)
+                        
+                        articles.append({
+                            'title': f"Историческое событие {year} года",
+                            'summary': formatted_post,
+                            'category': 'history',
+                            'url': data.get('url', ''),
+                            'image_url': image_url,
+                            'found_date': datetime.now()
+                        })
+                        
+                        if len(articles) >= 2:
+                            break
+            
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга исторических событий API: {e}")
+            return []
+
+    def parse_wikipedia_today_in_history(self):
+        """Парсинг 'сегодня в истории' из Wikipedia"""
+        try:
+            articles = []
+            
+            today = datetime.now()
+            url = "https://ru.wikipedia.org/w/api.php"
+            params = {
+                'action': 'query',
+                'prop': 'extracts',
+                'titles': f"{today.day} {self.get_month_name(today.month)}",
+                'exintro': True,
+                'explaintext': True,
+                'format': 'json'
+            }
+            
+            response = self.session.get(url, params=params, timeout=15)
+            data = response.json()
+            
+            pages = data.get('query', {}).get('pages', {})
+            for page_id, page_data in pages.items():
+                extract = page_data.get('extract', '')
+                if extract and self.is_relevant_content(extract):
+                    title = f"События {today.day} {self.get_month_name(today.month)}"
+                    image_url = self.get_wikipedia_image(title)
+                    
+                    formatted_post = self.format_historical_post(title, extract[:500] + "...", "")
+                    
+                    articles.append({
+                        'title': title,
+                        'summary': formatted_post,
+                        'category': 'history',
+                        'url': f"https://ru.wikipedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}",
+                        'image_url': image_url,
+                        'found_date': datetime.now()
+                    })
+            
+            return articles
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга Wikipedia сегодня в истории: {e}")
+            return []
+
     def parse_wikipedia_firsts(self):
         """Парсинг первых событий из Википедии"""
         try:
             articles = []
             
-            # Разнообразные запросы для поиска первых событий
             search_queries = [
-                "первый в мире",
-                "первое изобретение", 
-                "первое открытие",
-                "первый полет",
-                "первая фотография",
-                "первый компьютер",
-                "первый телефон",
-                "первый автомобиль",
-                "первый фильм",
-                "первая книга",
-                "первый спутник",
-                "первый человек в космосе",
-                "первая операция",
-                "первое лекарство",
-                "первый интернет",
-                "первый мобильный телефон",
-                "первый самолет",
-                "первая электрическая лампочка",
-                "первый телевизор",
-                "первое радио"
+                "первый искусственный спутник", "первый полет в космос", 
+                "первое изобретение", "революционное открытие", "первая фотография",
+                "первый компьютер", "первый телефон", "первый автомобиль"
             ]
             
-            for query in random.sample(search_queries, 4):  # Берем 4 случайных запроса
+            for query in random.sample(search_queries, 3):
                 try:
                     url = "https://ru.wikipedia.org/w/api.php"
                     params = {
@@ -175,8 +424,7 @@ class ContentFinder:
                         'list': 'search',
                         'srsearch': query,
                         'format': 'json',
-                        'srlimit': 5,
-                        'srwhat': 'text'
+                        'srlimit': 3
                     }
                     
                     response = self.session.get(url, params=params, timeout=15)
@@ -184,415 +432,113 @@ class ContentFinder:
                     
                     for item in data.get('query', {}).get('search', []):
                         title = item.get('title', '')
-                        snippet = item.get('snippet', '')
                         
-                        # Очищаем HTML теги из сниппета
-                        soup = BeautifulSoup(snippet, 'html.parser')
-                        clean_snippet = soup.get_text()
-                        
-                        if self.is_relevant_content(title + clean_snippet):
+                        if self.is_relevant_content(title):
                             full_content = self.get_wikipedia_content(title)
-                            if full_content and len(full_content) > 80:
-                                # Создаем уникальное описание
-                                formatted_post = self.create_wikipedia_post(title, full_content, query)
+                            if full_content:
+                                image_url = self.get_wikipedia_image(title)
+                                
+                                formatted_post = self.format_wikipedia_post(title, full_content, query)
                                 
                                 articles.append({
                                     'title': title,
                                     'summary': formatted_post,
-                                    'category': self.detect_category(title, full_content),
+                                    'category': 'wikipedia',
                                     'url': f"https://ru.wikipedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}",
-                                    'image_url': self.get_wikipedia_image(title),
+                                    'image_url': image_url,
                                     'found_date': datetime.now()
                                 })
                                 
-                                if len(articles) >= 3:
+                                if len(articles) >= 2:
                                     return articles
                     
-                    time.sleep(1.5)  # Задержка между запросами
+                    time.sleep(1)
                     
                 except Exception as e:
                     logger.error(f"❌ Ошибка парсинга запроса {query}: {e}")
                     continue
                     
-            return articles[:2]  # Возвращаем не более 2 статей
+            return articles
             
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга Wikipedia: {e}")
             return []
 
-    def parse_historical_events(self):
-        """Парсинг исторических событий"""
-        try:
-            articles = []
-            
-            # Используем разные подходы для получения исторических фактов
-            historical_methods = [
-                self.parse_historical_dates,
-                self.parse_famous_firsts,
-                self.parse_invention_history
-            ]
-            
-            for method in random.sample(historical_methods, 2):
-                try:
-                    content = method()
-                    if content:
-                        articles.extend(content)
-                        if len(articles) >= 2:
-                            break
-                except Exception as e:
-                    logger.error(f"❌ Ошибка метода истории: {e}")
-                    continue
-            
-            return articles[:2]
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка парсинга исторических событий: {e}")
-            return []
+    def get_month_name(self, month):
+        """Возвращает название месяца на русском"""
+        months = {
+            1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+            5: "мая", 6: "июня", 7: "июля", 8: "августа", 
+            9: "сентября", 10: "октября", 11: "ноября", 12: "декабря"
+        }
+        return months.get(month, "")
 
-    def parse_historical_dates(self):
-        """Парсинг исторических дат"""
+    def get_article_content(self, url):
+        """Получает контент статьи"""
         try:
-            # Исторические события с упором на "первые"
-            historical_events = [
-                {
-                    'title': 'Первая печатная книга',
-                    'content': 'Библия Гутенберга, изданная в 1455 году, стала первой книгой, напечатанной с использованием подвижного шрифта. Это изобретение Иоганна Гутенберга революционизировало распространение знаний.',
-                    'year': '1455'
-                },
-                {
-                    'title': 'Первая фотография',
-                    'content': 'В 1826 году Жозеф Нисефор Ньепс создал первую в истории фотографию «Вид из окна в Ле Гра». Экспозиция длилась 8 часов.',
-                    'year': '1826'
-                },
-                {
-                    'title': 'Первый полет братьев Райт',
-                    'content': '17 декабря 1903 года братья Райт совершили первый управляемый полет на самолете с двигателем. Продолжительность полета составила 12 секунд.',
-                    'year': '1903'
-                },
-                {
-                    'title': 'Первая успешная трансплантация сердца',
-                    'content': '3 декабря 1967 года Кристиан Барнард провел первую успешную пересадку сердца человеку. Операция длилась 9 часов.',
-                    'year': '1967'
-                }
+            response = self.session.get(url, timeout=15)
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            for element in soup(['script', 'style', 'nav', 'header', 'footer']):
+                element.decompose()
+            
+            content_selectors = [
+                'article', '.article-content', '.post-content', 
+                '.entry-content', '.content', 'main'
             ]
             
-            articles = []
-            for event in random.sample(historical_events, 2):
-                formatted_post = self.format_historical_post(event['title'], event['content'], event['year'])
-                
-                articles.append({
-                    'title': event['title'],
-                    'summary': formatted_post,
-                    'category': 'history',
-                    'url': '',
-                    'image_url': self.get_historical_image(),
-                    'found_date': datetime.now()
-                })
+            for selector in content_selectors:
+                content_elem = soup.select_one(selector)
+                if content_elem:
+                    text = content_elem.get_text(strip=True)
+                    if len(text) > 200:
+                        return text[:500] + '...'
             
-            return articles
+            paragraphs = soup.find_all('p')
+            text = ' '.join([p.get_text(strip=True) for p in paragraphs[:5]])
+            return text[:500] + '...' if len(text) > 500 else text
             
         except Exception as e:
-            logger.error(f"❌ Ошибка создания исторических дат: {e}")
-            return []
+            logger.error(f"❌ Ошибка получения контента статьи: {e}")
+            return ""
 
-    def parse_famous_firsts(self):
-        """Известные первые достижения"""
+    def extract_image_from_article(self, url):
+        """Извлекает изображение из статьи"""
         try:
-            firsts = [
-                {
-                    'title': 'Первая женщина-космонавт',
-                    'content': 'Валентина Терешкова стала первой женщиной в космосе 16 июня 1963 года на корабле Восток-6. Ее полет длился почти трое суток.',
-                    'person': 'Валентина Терешкова'
-                },
-                {
-                    'title': 'Первый программист',
-                    'content': 'Ада Лавлейс считается первым программистом в истории. В 1843 году она написала первую в мире программу для аналитической машины Чарльза Бэббиджа.',
-                    'person': 'Ада Лавлейс'
-                },
-                {
-                    'title': 'Первый нобелевский лауреат',
-                    'content': 'Вильгельм Конрад Рентген стал первым лауреатом Нобелевской премии по физике в 1901 году за открытие рентгеновских лучей.',
-                    'person': 'Вильгельм Рентген'
-                }
+            response = self.session.get(url, timeout=15)
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            image_selectors = [
+                'meta[property="og:image"]',
+                'meta[name="twitter:image"]',
+                '.article-image img',
+                '.post-image img',
+                '.entry-content img',
+                'article img'
             ]
             
-            articles = []
-            for first in random.sample(firsts, 2):
-                formatted_post = self.format_person_post(first['title'], first['content'], first['person'])
-                
-                articles.append({
-                    'title': first['title'],
-                    'summary': formatted_post,
-                    'category': 'achievement',
-                    'url': '',
-                    'image_url': self.get_achievement_image(),
-                    'found_date': datetime.now()
-                })
+            for selector in image_selectors:
+                img_elem = soup.select_one(selector)
+                if img_elem:
+                    if img_elem.get('content'):
+                        image_url = img_elem['content']
+                    else:
+                        image_url = img_elem.get('src', '')
+                    
+                    if image_url and image_url.startswith('http'):
+                        if image_url.startswith('//'):
+                            image_url = 'https:' + image_url
+                        elif image_url.startswith('/'):
+                            from urllib.parse import urljoin
+                            image_url = urljoin(url, image_url)
+                        
+                        return image_url
             
-            return articles
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания первых достижений: {e}")
-            return []
-
-    def parse_science_discoveries(self):
-        """Парсинг научных открытий"""
-        try:
-            articles = []
-            
-            # Научные открытия и изобретения
-            discoveries = [
-                {
-                    'title': 'Открытие пенициллина',
-                    'content': 'Александр Флеминг случайно открыл пенициллин в 1928 году. Это первый антибиотик, который произвел революцию в медицине.',
-                    'year': '1928',
-                    'scientist': 'Александр Флеминг'
-                },
-                {
-                    'title': 'Первая вакцина',
-                    'content': 'Эдвард Дженнер создал первую вакцину против оспы в 1796 году. Он использовал вирус коровьей оспы для защиты от натуральной оспы.',
-                    'year': '1796',
-                    'scientist': 'Эдвард Дженнер'
-                },
-                {
-                    'title': 'Открытие структуры ДНК',
-                    'content': 'Джеймс Уотсон и Фрэнсис Крик открыли двойную спираль ДНК в 1953 году. Это фундаментальное открытие в генетике.',
-                    'year': '1953',
-                    'scientist': 'Уотсон и Крик'
-                },
-                {
-                    'title': 'Первый телескоп',
-                    'content': 'Галилео Галилей первым использовал телескоп для астрономических наблюдений в 1609 году. Он открыл спутники Юпитера и фазы Венеры.',
-                    'year': '1609',
-                    'scientist': 'Галилео Галилей'
-                }
-            ]
-            
-            for discovery in random.sample(discoveries, 2):
-                formatted_post = self.format_science_post(
-                    discovery['title'], 
-                    discovery['content'], 
-                    discovery['year'], 
-                    discovery['scientist']
-                )
-                
-                articles.append({
-                    'title': discovery['title'],
-                    'summary': formatted_post,
-                    'category': 'science',
-                    'url': '',
-                    'image_url': self.get_science_image(),
-                    'found_date': datetime.now()
-                })
-            
-            return articles
+            return None
             
         except Exception as e:
-            logger.error(f"❌ Ошибка создания научных открытий: {e}")
-            return []
-
-    def parse_tech_innovations(self):
-        """Парсинг технологических инноваций"""
-        try:
-            articles = []
-            
-            # Технологические инновации
-            innovations = [
-                {
-                    'title': 'Первый смартфон',
-                    'content': 'IBM Simon, выпущенный в 1994 году, считается первым смартфоном. Он сочетал функции телефона и КПК.',
-                    'year': '1994',
-                    'company': 'IBM'
-                },
-                {
-                    'title': 'Первый веб-сайт',
-                    'content': 'Первый в мире веб-сайт info.cern.ch был запущен Тимом Бернерсом-Ли в 1991 году. Он объяснял концепцию Всемирной паутины.',
-                    'year': '1991',
-                    'company': 'CERN'
-                },
-                {
-                    'title': 'Первый микропроцессор',
-                    'content': 'Intel 4004, выпущенный в 1971 году, стал первым коммерческим микропроцессором. Он содержал 2300 транзисторов.',
-                    'year': '1971',
-                    'company': 'Intel'
-                },
-                {
-                    'title': 'Первая компьютерная мышь',
-                    'content': 'Дуглас Энгельбарт изобрел первую компьютерную мышь в 1964 году. Устройство было деревянным с двумя металлическими колесами.',
-                    'year': '1964',
-                    'company': 'Stanford Research Institute'
-                }
-            ]
-            
-            for innovation in random.sample(innovations, 2):
-                formatted_post = self.format_tech_post(
-                    innovation['title'], 
-                    innovation['content'], 
-                    innovation['year'], 
-                    innovation['company']
-                )
-                
-                articles.append({
-                    'title': innovation['title'],
-                    'summary': formatted_post,
-                    'category': 'technology',
-                    'url': '',
-                    'image_url': self.get_tech_image(),
-                    'found_date': datetime.now()
-                })
-            
-            return articles
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания технологических инноваций: {e}")
-            return []
-
-    def parse_cultural_firsts(self):
-        """Парсинг культурных первых"""
-        try:
-            articles = []
-            
-            cultural_firsts = [
-                {
-                    'title': 'Первый полнометражный мультфильм',
-                    'content': '«Белоснежка и семь гномов» (1937) стал первым полнометражным анимационным фильмом. Производство заняло 3 года.',
-                    'year': '1937',
-                    'studio': 'Walt Disney'
-                },
-                {
-                    'title': 'Первая звуковая кинокартина',
-                    'content': '«Певец джаза» (1927) стал первым полнометражным фильмом с синхронной звуковой дорожкой.',
-                    'year': '1927',
-                    'studio': 'Warner Bros.'
-                },
-                {
-                    'title': 'Первый роман-антиутопия',
-                    'content': '«Мы» Евгения Замятина (1920) считается первым романом-антиутопией, повлиявшим на Оруэлла и Хаксли.',
-                    'year': '1920',
-                    'author': 'Евгений Замятин'
-                }
-            ]
-            
-            for cultural in random.sample(cultural_firsts, 2):
-                formatted_post = self.format_cultural_post(
-                    cultural['title'], 
-                    cultural['content'], 
-                    cultural['year'], 
-                    cultural.get('studio') or cultural.get('author')
-                )
-                
-                articles.append({
-                    'title': cultural['title'],
-                    'summary': formatted_post,
-                    'category': 'culture',
-                    'url': '',
-                    'image_url': self.get_cultural_image(),
-                    'found_date': datetime.now()
-                })
-            
-            return articles
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания культурных первых: {e}")
-            return []
-
-    def parse_sports_records(self):
-        """Парсинг спортивных рекордов"""
-        try:
-            articles = []
-            
-            sports_records = [
-                {
-                    'title': 'Первый четырехминутный миля',
-                    'content': 'Роджер Баннистер первым пробежал милю быстрее 4 минут 6 мая 1954 года. Его результат: 3 минуты 59.4 секунды.',
-                    'year': '1954',
-                    'athlete': 'Роджер Баннистер'
-                },
-                {
-                    'title': 'Первое восхождение на Эверест',
-                    'content': 'Эдмунд Хиллари и Тенцинг Норгей первыми покорили Эверест 29 мая 1953 года.',
-                    'year': '1953',
-                    'athlete': 'Хиллари и Норгей'
-                },
-                {
-                    'title': 'Первый олимпийский чемпион',
-                    'content': 'Джеймс Конноли стал первым олимпийским чемпионом современности, выиграв тройной прыжок 6 апреля 1896 года.',
-                    'year': '1896',
-                    'athlete': 'Джеймс Конноли'
-                }
-            ]
-            
-            for record in random.sample(sports_records, 2):
-                formatted_post = self.format_sports_post(
-                    record['title'], 
-                    record['content'], 
-                    record['year'], 
-                    record['athlete']
-                )
-                
-                articles.append({
-                    'title': record['title'],
-                    'summary': formatted_post,
-                    'category': 'sports',
-                    'url': '',
-                    'image_url': self.get_sports_image(),
-                    'found_date': datetime.now()
-                })
-            
-            return articles
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания спортивных рекордов: {e}")
-            return []
-
-    def parse_invention_history(self):
-        """История изобретений"""
-        try:
-            articles = []
-            
-            inventions = [
-                {
-                    'title': 'Изобретение печатного станка',
-                    'content': 'Иоганн Гутенберг изобрел печатный станок с подвижными литерами около 1440 года. Это изобретение революционизировало распространение информации.',
-                    'year': '1440',
-                    'inventor': 'Иоганн Гутенберг'
-                },
-                {
-                    'title': 'Изобретение лампочки',
-                    'content': 'Томас Эдисон запатентовал первую практическую лампу накаливания в 1879 году. Она могла гореть до 1200 часов.',
-                    'year': '1879',
-                    'inventor': 'Томас Эдисон'
-                },
-                {
-                    'title': 'Изобретение радио',
-                    'content': 'Александр Попов продемонстрировал первый радиоприемник 7 мая 1895 года. Гульельмо Маркони независимо разработал похожую систему.',
-                    'year': '1895',
-                    'inventor': 'Александр Попов'
-                }
-            ]
-            
-            for invention in random.sample(inventions, 2):
-                formatted_post = self.format_invention_post(
-                    invention['title'], 
-                    invention['content'], 
-                    invention['year'], 
-                    invention['inventor']
-                )
-                
-                articles.append({
-                    'title': invention['title'],
-                    'summary': formatted_post,
-                    'category': 'invention',
-                    'url': '',
-                    'image_url': self.get_invention_image(),
-                    'found_date': datetime.now()
-                })
-            
-            return articles
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания истории изобретений: {e}")
-            return []
+            logger.error(f"❌ Ошибка извлечения изображения: {e}")
+            return None
 
     def get_wikipedia_content(self, title):
         """Получает контент из Wikipedia"""
@@ -614,7 +560,6 @@ class ContentFinder:
             for page_id, page_data in pages.items():
                 extract = page_data.get('extract', '')
                 if extract:
-                    # Берем первый значимый абзац
                     paragraphs = [p for p in extract.split('\n') if p.strip()]
                     if paragraphs:
                         return paragraphs[0][:600] + '...' if len(paragraphs[0]) > 600 else paragraphs[0]
@@ -646,200 +591,183 @@ class ContentFinder:
                 if thumbnail:
                     return thumbnail.get('source', '')
             
-            return self.get_random_image()
+            return self.get_relevant_image(title, "")
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения изображения Wikipedia: {e}")
-            return self.get_random_image()
+            return self.get_default_image()
 
-    def create_wikipedia_post(self, title, content, query):
-        """Создает пост на основе Wikipedia контента"""
-        templates = [
-            "🌍 ИСТОРИЧЕСКОЕ СОБЫТИЕ\n\n{title}\n\n{content}\n\n🔍 Найдено по запросу: {query}\n\n📚 Это событие стало важной вехой в истории человечества.\n\n#история #событие #память",
+    def get_relevant_image(self, title, content):
+        """Находит релевантное изображение по заголовку и содержанию"""
+        try:
+            text = (title + ' ' + content).lower()
             
-            "💫 ПЕРВЫЙ ШАГ\n\n{title}\n\n{content}\n\n🔍 Найдено по запросу: {query}\n\n🚀 Это достижение открыло новые возможности для развития цивилизации.\n\n#первый #история #достижение",
+            # Космос и астрономия
+            if any(word in text for word in ['космос', 'спутник', 'ракета', 'гагарин', 'терешкова', 'космонавт', 'орбита', 'планета']):
+                return self.get_space_image()
             
-            "🏆 ВАЖНОЕ ОТКРЫТИЕ\n\n{title}\n\n{content}\n\n🔍 Найдено по запросу: {query}\n\n💡 Это изобретение изменило ход истории и продолжает влиять на нашу жизнь.\n\n#открытие #изобретение #история"
+            # Наука и исследования
+            elif any(word in text for word in ['наука', 'ученый', 'открытие', 'исследование', 'лаборатория', 'эксперимент']):
+                return self.get_science_image()
+            
+            # Технологии
+            elif any(word in text for word in ['технология', 'компьютер', 'смартфон', 'интернет', 'программирование', 'софт']):
+                return self.get_tech_image()
+            
+            # История
+            elif any(word in text for word in ['история', 'исторический', 'древний', 'археология', 'прошлое', 'событие']):
+                return self.get_historical_image()
+            
+            # Медицина
+            elif any(word in text for word in ['медицина', 'врач', 'лекарство', 'болезнь', 'здоровье', 'вирус']):
+                return self.get_medical_image()
+            
+            # Изобретения
+            elif any(word in text for word in ['изобретение', 'патент', 'инновация', 'разработка', 'создал']):
+                return self.get_invention_image()
+            
+            else:
+                return self.get_thematic_image(text)
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка поиска релевантного изображения: {e}")
+            return self.get_default_image()
+
+    def get_space_image(self):
+        """Изображения космоса"""
+        space_images = [
+            'https://images.unsplash.com/photo-1446776653964-20c1d3a81b06?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1462331940025-496dfbfc7564?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1502136969935-8d8eef54d77b?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1464802686167-b939a6910659?w=800&fit=crop',
         ]
-        
-        template = random.choice(templates)
-        return template.format(title=title.upper(), content=content, query=query)
-
-    def format_historical_post(self, title, content, year):
-        """Форматирует исторический пост"""
-        templates = [
-            "📜 ИСТОРИЧЕСКИЙ ФАКТ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n\n📚 Это событие стало поворотным моментом в истории.\n\n#история #факт #память",
-            
-            "🕰️ ВЕХА ИСТОРИИ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n\n🎯 Это достижение изменило ход истории.\n\n#история #веха #достижение"
-        ]
-        
-        template = random.choice(templates)
-        return template.format(title=title.upper(), content=content, year=year)
-
-    def format_science_post(self, title, content, year, scientist):
-        """Форматирует научный пост"""
-        templates = [
-            "🔬 НАУЧНОЕ ОТКРЫТИЕ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n👨‍🔬 Ученый: {scientist}\n\n💫 Это открытие изменило наши представления о мире.\n\n#наука #открытие #исследование",
-            
-            "🌌 ПРОРЫВ В НАУКЕ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n👨‍🔬 Ученый: {scientist}\n\n🚀 Ученые совершили важный шаг в понимании законов природы.\n\n#наука #прорыв #исследование"
-        ]
-        
-        template = random.choice(templates)
-        return template.format(title=title.upper(), content=content, year=year, scientist=scientist)
-
-    def format_tech_post(self, title, content, year, company):
-        """Форматирует технологический пост"""
-        templates = [
-            "⚡ ТЕХНОЛОГИЧЕСКАЯ РЕВОЛЮЦИЯ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🏢 Компания: {company}\n\n💡 Это изобретение изменило подход к решению задач.\n\n#технологии #инновации #будущее",
-            
-            "🤖 ИННОВАЦИОННАЯ РАЗРАБОТКА\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🏢 Компания: {company}\n\n🚀 Прогресс не стоит на месте - это достижение демонстрирует новые горизонты.\n\n#технологии #разработка #инновации"
-        ]
-        
-        template = random.choice(templates)
-        return template.format(title=title.upper(), content=content, year=year, company=company)
-
-    def format_person_post(self, title, content, person):
-        """Форматирует пост о личности"""
-        templates = [
-            "🌟 ИСТОРИЧЕСКАЯ ЛИЧНОСТЬ\n\n{title}\n\n{content}\n\n👤 Персона: {person}\n\n💫 Это достижение навсегда изменило мир.\n\n#история #личность #достижение",
-            
-            "🎯 ПЕРВЫЙ ШАГ\n\n{title}\n\n{content}\n\n👤 Персона: {person}\n\n🚀 С этого момента началась новая эра.\n\n#первый #история #изобретение"
-        ]
-        
-        template = random.choice(templates)
-        return template.format(title=title.upper(), content=content, person=person)
-
-    def format_cultural_post(self, title, content, year, creator):
-        """Форматирует культурный пост"""
-        templates = [
-            "🎭 КУЛЬТУРНОЕ СОБЫТИЕ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🎬 Создатель: {creator}\n\n📚 Это произведение изменило культурный ландшафт.\n\n#культура #искусство #история",
-            
-            "🎨 ТВОРЧЕСКИЙ ПРОРЫВ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🎬 Создатель: {creator}\n\n💫 Это достижение открыло новые горизонты в искусстве.\n\n#культура #творчество #инновации"
-        ]
-        
-        template = random.choice(templates)
-        return template.format(title=title.upper(), content=content, year=year, creator=creator)
-
-    def format_sports_post(self, title, content, year, athlete):
-        """Форматирует спортивный пост"""
-        templates = [
-            "🏆 СПОРТИВНЫЙ РЕКОРД\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🏃‍♂️ Спортсмен: {athlete}\n\n💪 Это достижение показало новые возможности человека.\n\n#спорт #рекорд #достижение",
-            
-            "🚀 ИСТОРИЧЕСКИЙ МОМЕНТ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n🏃‍♂️ Спортсмен: {athlete}\n\n🎯 Этот рекорд навсегда вошел в историю спорта.\n\n#спорт #история #момент"
-        ]
-        
-        template = random.choice(templates)
-        return template.format(title=title.upper(), content=content, year=year, athlete=athlete)
-
-    def format_invention_post(self, title, content, year, inventor):
-        """Форматирует пост об изобретении"""
-        templates = [
-            "💡 ВЕЛИКОЕ ИЗОБРЕТЕНИЕ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n👨‍🔬 Изобретатель: {inventor}\n\n⚡ Это изобретение кардинально изменило жизнь людей.\n\n#изобретение #инновации #история",
-            
-            "🔧 ТЕХНИЧЕСКИЙ ПРОРЫВ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n👨‍🔬 Изобретатель: {inventor}\n\n🚀 Это достижение открыло новые технологические горизонты.\n\n#технологии #прорыв #изобретение"
-        ]
-        
-        template = random.choice(templates)
-        return template.format(title=title.upper(), content=content, year=year, inventor=inventor)
-
-    def detect_category(self, title, content):
-        """Определяет категорию контента"""
-        text = (title + content).lower()
-        
-        if any(word in text for word in ['наука', 'ученый', 'открытие', 'исследование']):
-            return 'science'
-        elif any(word in text for word in ['технология', 'компьютер', 'интернет', 'смартфон']):
-            return 'technology'
-        elif any(word in text for word in ['история', 'исторический', 'прошлое', 'древний']):
-            return 'history'
-        elif any(word in text for word in ['культура', 'искусство', 'кино', 'музыка']):
-            return 'culture'
-        elif any(word in text for word in ['спорт', 'спортсмен', 'рекорд', 'олимпийский']):
-            return 'sports'
-        else:
-            return 'achievement'
+        return random.choice(space_images)
 
     def get_science_image(self):
-        """Возвращает изображение для научных постов"""
+        """Научные изображения"""
         science_images = [
-            'https://images.unsplash.com/photo-1532094349884-543bc11b234d?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1563089145-599997674d42?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1554475900-0a0350e3fc7b?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1507413245164-6160d8298b31?w=500&fit=crop'
+            'https://images.unsplash.com/photo-1532094349884-543bc11b234d?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1563089145-599997674d42?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1554475900-0a0350e3fc7b?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1507413245164-6160d8298b31?w=800&fit=crop',
         ]
         return random.choice(science_images)
 
     def get_tech_image(self):
-        """Возвращает изображение для технологических постов"""
+        """Технологические изображения"""
         tech_images = [
-            'https://images.unsplash.com/photo-1518709268805-4e9042af2176?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1517077304055-6e89abbf09b0?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1542831371-29b0f74f9713?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1550751827-4bd374c3f58b?w=500&fit=crop'
+            'https://images.unsplash.com/photo-1518709268805-4e9042af2176?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1517077304055-6e89abbf09b0?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1542831371-29b0f74f9713?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1550751827-4bd374c3f58b?w=800&fit=crop',
         ]
         return random.choice(tech_images)
 
     def get_historical_image(self):
-        """Возвращает изображение для исторических постов"""
+        """Исторические изображения"""
         historical_images = [
-            'https://images.unsplash.com/photo-1481627834876-b7833e8f5570?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1589652717521-10c0d092dea9?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1505664194779-8beaceb93744?w=500&fit=crop'
+            'https://images.unsplash.com/photo-1481627834876-b7833e8f5570?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1589652717521-10c0d092dea9?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1505664194779-8beaceb93744?w=800&fit=crop',
         ]
         return random.choice(historical_images)
 
-    def get_cultural_image(self):
-        """Возвращает изображение для культурных постов"""
-        cultural_images = [
-            'https://images.unsplash.com/photo-1514320291840-2e0a9bf2a9ae?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1503095396549-807759245b35?w=500&fit=crop'
+    def get_medical_image(self):
+        """Медицинские изображения"""
+        medical_images = [
+            'https://images.unsplash.com/photo-1559757148-5c350d0d3c56?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1576091160399-112ba8d25d1f?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1559757175-0eb30cd8c063?w=800&fit=crop',
         ]
-        return random.choice(cultural_images)
-
-    def get_sports_image(self):
-        """Возвращает изображение для спортивных постов"""
-        sports_images = [
-            'https://images.unsplash.com/photo-1461896836934-ffe607ba8211?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1571019613454-1cb2f99b2d8b?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1556817411-31ae72fa3ea0?w=500&fit=crop'
-        ]
-        return random.choice(sports_images)
-
-    def get_achievement_image(self):
-        """Возвращает изображение для постов о достижениях"""
-        achievement_images = [
-            'https://images.unsplash.com/photo-1563089145-599997674d42?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1517048676732-d65bc937f952?w=500&fit=crop'
-        ]
-        return random.choice(achievement_images)
+        return random.choice(medical_images)
 
     def get_invention_image(self):
-        """Возвращает изображение для постов об изобретениях"""
+        """Изображения изобретений"""
         invention_images = [
-            'https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1518709268805-4e9042af2176?w=500&fit=crop',
-            'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=500&fit=crop'
+            'https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1454165804606-c3d57bc86b40?w=800&fit=crop',
         ]
         return random.choice(invention_images)
 
-    def get_random_image(self):
-        """Возвращает случайное изображение"""
-        all_images = (
-            self.get_science_image(),
-            self.get_tech_image(),
-            self.get_historical_image(),
-            self.get_cultural_image(),
-            self.get_sports_image(),
-            self.get_achievement_image(),
-            self.get_invention_image()
-        )
-        return random.choice(all_images)
+    def get_thematic_image(self, text):
+        """Тематическое изображение на основе текста"""
+        if any(word in text for word in ['первый', 'рекорд', 'достижение']):
+            achievement_images = [
+                'https://images.unsplash.com/photo-1563089145-599997674d42?w=800&fit=crop',
+                'https://images.unsplash.com/photo-1517048676732-d65bc937f952?w=800&fit=crop',
+            ]
+            return random.choice(achievement_images)
+        else:
+            return self.get_default_image()
+
+    def get_default_image(self):
+        """Изображение по умолчанию"""
+        default_images = [
+            'https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=800&fit=crop',
+            'https://images.unsplash.com/photo-1481627834876-b7833e8f5570?w=800&fit=crop',
+        ]
+        return random.choice(default_images)
+
+    def get_historical_image_for_event(self, event_text, year):
+        """Специфичное изображение для исторического события"""
+        text = event_text.lower()
+        
+        if any(word in text for word in ['война', 'сражение', 'битва']):
+            return 'https://images.unsplash.com/photo-1547234931-12c622f4fc37?w=800&fit=crop'
+        elif any(word in text for word in ['революция', 'восстание']):
+            return 'https://images.unsplash.com/photo-1505664194779-8beaceb93744?w=800&fit=crop'
+        else:
+            return self.get_historical_image()
+
+    def format_news_post(self, title, content, keyword):
+        """Форматирует новостной пост"""
+        templates = [
+            "📰 АКТУАЛЬНАЯ НОВОСТЬ\n\n{title}\n\n{content}\n\n🔍 Найдено по запросу: {keyword}\n\n#новости #открытие #актуальное",
+            "🌍 ВАЖНОЕ СОБЫТИЕ\n\n{title}\n\n{content}\n\n🔍 Найдено по запросу: {keyword}\n\n#событие #важно #новости"
+        ]
+        template = random.choice(templates)
+        return template.format(title=title.upper(), content=content, keyword=keyword)
+
+    def format_science_post(self, title, content):
+        """Форматирует научный пост"""
+        templates = [
+            "🔬 НАУЧНОЕ ОТКРЫТИЕ\n\n{title}\n\n{content}\n\n💫 Это открытие меняет наши представления о мире\n\n#наука #открытие #исследование",
+            "🌌 ПРОРЫВ В НАУКЕ\n\n{title}\n\n{content}\n\n🚀 Ученые совершили важный шаг в понимании законов природы\n\n#наука #прорыв #исследование"
+        ]
+        template = random.choice(templates)
+        return template.format(title=title.upper(), content=content)
+
+    def format_tech_post(self, title, content):
+        """Форматирует технологический пост"""
+        templates = [
+            "⚡ ТЕХНОЛОГИЧЕСКАЯ РЕВОЛЮЦИЯ\n\n{title}\n\n{content}\n\n💡 Это изобретение меняет подход к решению задач\n\n#технологии #инновации #будущее",
+            "🤖 ИННОВАЦИОННАЯ РАЗРАБОТКА\n\n{title}\n\n{content}\n\n🚀 Прогресс не стоит на месте\n\n#технологии #разработка #инновации"
+        ]
+        template = random.choice(templates)
+        return template.format(title=title.upper(), content=content)
+
+    def format_historical_post(self, title, content, year):
+        """Форматирует исторический пост"""
+        templates = [
+            "🏆 ИСТОРИЧЕСКОЕ СОБЫТИЕ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n\n📚 Это событие стало поворотным моментом в истории\n\n#история #событие #память",
+            "💡 ВЕЛИКОЕ ОТКРЫТИЕ\n\n{title}\n\n{content}\n\n📅 Год: {year}\n\n🎯 Это достижение изменило ход истории\n\n#история #открытие #достижение"
+        ]
+        template = random.choice(templates)
+        return template.format(title=title.upper(), content=content, year=year)
+
+    def format_wikipedia_post(self, title, content, query):
+        """Форматирует Wikipedia пост"""
+        templates = [
+            "🌍 ИСТОРИЧЕСКИЙ ФАКТ\n\n{title}\n\n{content}\n\n🔍 Найдено по запросу: {query}\n\n📚 Это событие стало важной вехой\n\n#история #факт #память",
+            "💫 ПЕРВЫЙ ШАГ\n\n{title}\n\n{content}\n\n🔍 Найдено по запросу: {query}\n\n🚀 Это достижение открыло новые возможности\n\n#первый #история #достижение"
+        ]
+        template = random.choice(templates)
+        return template.format(title=title.upper(), content=content, query=query)
 
     def is_relevant_content(self, text):
-        """Проверяет релевантность контента - ищем упоминания первых событий"""
+        """Проверяет релевантность контента"""
         keywords = [
             'первый', 'первое', 'первая', 'впервые', 'впервы',
             'изобретение', 'открытие', 'революция', 'прорыв',
